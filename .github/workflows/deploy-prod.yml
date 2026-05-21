@@ -1,0 +1,273 @@
+# Deploy production (reusable workflow).
+#
+# Lifted from torquetech .github/workflows/deploy-prod.yml. Four jobs:
+#
+#   1. find-green-commit  — find last green commit on the upstream
+#                            (beta) workflow; skip if prod is up to date
+#   2. build-web-prod     — build the prod-flavoured web image with
+#                            REACT_APP_API_URL=https://${prod-domain}
+#                            (the API + backup images are reused from
+#                            beta — no rebuild needed)
+#   3. ssl-setup-prod     — bootstrap SSL via inputs.ssl-script (server-side)
+#   4. deploy-prod        — SSH deploy via inputs.deploy-script
+#
+# Required caller secrets — same set as deploy-beta.yml plus:
+#   (none additional)
+#
+# Per-RFC 0019 § 3 option 3a, secrets: inherit. See deploy-beta.yml
+# header for the full expected-secrets list.
+
+name: Deploy production (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      domain:
+        description: 'Production domain (e.g. torquetech.chthonicsystems.com)'
+        type: string
+        required: true
+      docker-image-prefix:
+        description: 'Image-name prefix (e.g. chthonicsystems/torquetech)'
+        type: string
+        required: true
+      upstream-workflow-file:
+        description: 'Upstream workflow file used to determine last-green commit'
+        type: string
+        required: false
+        default: 'deploy-beta.yml'
+      working-directory:
+        description: 'Server-side working directory'
+        type: string
+        required: false
+        default: '/opt/torquetech'
+      ssl-script:
+        description: 'Server-side SSL setup script'
+        type: string
+        required: false
+        default: './scripts/setup-ssl-github.sh'
+      deploy-script:
+        description: 'Server-side deploy script'
+        type: string
+        required: false
+        default: './scripts/deploy-github.sh'
+      web-context:
+        description: 'Build context for the prod web image'
+        type: string
+        required: false
+        default: './web'
+      app-version-json-path:
+        description: 'Repo path to web/app_version.json'
+        type: string
+        required: false
+        default: 'web/app_version.json'
+      runner-environment:
+        description: 'GitHub Environment name (typically production)'
+        type: string
+        required: false
+        default: 'production'
+      runs-on:
+        description: 'Runner image'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+      ssh-command-timeout:
+        description: 'SSH command timeout'
+        type: string
+        required: false
+        default: '15m'
+      branch:
+        description: 'Branch to look up upstream successful runs on'
+        type: string
+        required: false
+        default: 'main'
+
+permissions:
+  actions: read
+  contents: read
+  packages: read
+
+env:
+  GITHUB_USERNAME: ${{ github.actor }}
+  GITHUB_PACKAGES_PAT: ${{ secrets.CHTHONIC_PACKAGES_PAT || secrets.GITHUB_TOKEN }}
+
+jobs:
+  find-green-commit:
+    runs-on: ${{ inputs.runs-on }}
+    outputs:
+      sha: ${{ steps.find.outputs.sha }}
+      should_deploy: ${{ steps.find.outputs.should_proceed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find last-green upstream commit
+        id: find
+        uses: chthonicsystems/devops-workflows/actions/find-green-beta-commit@main
+        with:
+          upstream-workflow-file: ${{ inputs.upstream-workflow-file }}
+          caller-workflow-file: deploy-prod.yml
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ inputs.branch }}
+          fail-on-no-upstream: 'false'
+
+      - name: Summary
+        run: |
+          {
+            echo "## 🔍 Green Commit Check"
+            echo "**SHA:** ${{ steps.find.outputs.sha || 'none' }}"
+            echo "**Deploy:** ${{ steps.find.outputs.should_proceed }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build-web-prod:
+    needs: find-green-commit
+    if: needs.find-green-commit.outputs.should_deploy == 'true'
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.runner-environment }}
+    steps:
+      - name: Checkout green commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.find-green-commit.outputs.sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Read app version
+        id: app-version
+        env:
+          APP_VERSION_JSON: ${{ inputs.app-version-json-path }}
+        run: |
+          VERSION=$(node -e "const d = require('./${APP_VERSION_JSON}'); console.log(d.latest);")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Production Web image
+        uses: chthonicsystems/devops-workflows/actions/docker-buildx-push@main
+        with:
+          image-name: ${{ inputs.docker-image-prefix }}-web
+          context: ${{ inputs.web-context }}
+          tags: |
+            ${{ inputs.docker-image-prefix }}-web:latest
+            ${{ inputs.docker-image-prefix }}-web:main-${{ needs.find-green-commit.outputs.sha }}
+          build-args: |
+            GITHUB_PACKAGES_PAT=${{ env.GITHUB_PACKAGES_PAT }}
+            REACT_APP_VERSION=${{ steps.app-version.outputs.version }}
+            REACT_APP_API_URL=https://${{ inputs.domain }}
+            REACT_APP_GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}
+            REACT_APP_MICROSOFT_CLIENT_ID=${{ secrets.MICROSOFT_CLIENT_ID }}
+            REACT_APP_APPLE_CLIENT_ID=${{ secrets.APPLE_CLIENT_ID }}
+            REACT_APP_FIREBASE_API_KEY=${{ secrets.FIREBASE_API_KEY }}
+            REACT_APP_FIREBASE_AUTH_DOMAIN=${{ secrets.FIREBASE_AUTH_DOMAIN }}
+            REACT_APP_FIREBASE_PROJECT_ID=${{ secrets.FIREBASE_PROJECT_ID }}
+            REACT_APP_FIREBASE_STORAGE_BUCKET=${{ secrets.FIREBASE_STORAGE_BUCKET }}
+            REACT_APP_FIREBASE_MESSAGING_SENDER_ID=${{ secrets.FIREBASE_MESSAGING_SENDER_ID }}
+            REACT_APP_FIREBASE_APP_ID=${{ secrets.FIREBASE_APP_ID }}
+            REACT_APP_FIREBASE_VAPID_KEY=${{ secrets.FIREBASE_VAPID_KEY }}
+          cache-scope: web-prod
+          registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+  ssl-setup-prod:
+    needs: [find-green-commit, build-web-prod]
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.runner-environment }}
+    steps:
+      - name: Setup SSL certificates on production
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          envs: DOMAIN,SSL_EMAIL,GREEN_SHA
+          script: |
+            set -e
+            cd ${{ inputs.working-directory }}
+            git fetch origin ${{ inputs.branch }}
+            git checkout $GREEN_SHA
+            ${{ inputs.ssl-script }}
+        env:
+          DOMAIN: ${{ inputs.domain }}
+          SSL_EMAIL: ${{ secrets.SSL_EMAIL }}
+          GREEN_SHA: ${{ needs.find-green-commit.outputs.sha }}
+
+  deploy-prod:
+    needs: [find-green-commit, ssl-setup-prod]
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.runner-environment }}
+    steps:
+      - name: Deploy to production server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          command_timeout: ${{ inputs.ssh-command-timeout }}
+          envs: API_IMAGE,WEB_IMAGE,BACKUP_IMAGE,DOMAIN,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN,MYSQL_ROOT_PASSWORD,MYSQL_PASSWORD,JWT_SECRET,RUN_MIGRATIONS,FIREBASE_SERVICE_ACCOUNT_JSON,FIREBASE_PROJECT_ID,AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_REGION,S3_BACKUP_BUCKET,AWS_MEDIA_BUCKET,AWS_DOCUMENTS_BUCKET,AWS_ANDROID_BUCKET,AWS_BEDROCK_ACCESS_KEY_ID,AWS_BEDROCK_SECRET_ACCESS_KEY,AWS_BEDROCK_GUARDRAIL_ID,AWS_BEDROCK_GUARDRAIL_VERSION,AI_KEYPAIR_SECRET_NAME,AI_LOG_GROUP_NAME,FROM_EMAIL,GOOGLE_CLIENT_ID,MICROSOFT_CLIENT_ID,APPLE_CLIENT_ID,STRIPE_SECRET_KEY,STRIPE_WEBHOOK_SECRET,STRIPE_STANDARD_PRICE_ID,STRIPE_PREMIUM_PRICE_ID,TWILIO_ACCOUNT_SID,TWILIO_AUTH_TOKEN,TWILIO_PHONE_NUMBER,XERO_CLIENT_ID,XERO_CLIENT_SECRET,XERO_WEBHOOK_KEY,QB_CLIENT_ID,QB_CLIENT_SECRET,QB_WEBHOOK_VERIFIER_TOKEN,ACCOUNTING_REDIRECT_BASE_URL,FRONTEND_URL,GOOGLE_PLACES_API_KEY,GH_SUPPORT_TOKEN,GH_SUPPORT_REPO
+          script: |
+            set -e
+            cd ${{ inputs.working-directory }}
+            ${{ inputs.deploy-script }}
+        env:
+          API_IMAGE: ${{ inputs.docker-image-prefix }}-api
+          WEB_IMAGE: ${{ inputs.docker-image-prefix }}-web
+          BACKUP_IMAGE: ${{ inputs.docker-image-prefix }}-backup
+          DOMAIN: ${{ inputs.domain }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          RUN_MIGRATIONS: ${{ secrets.RUN_MIGRATIONS }}
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET }}
+          AWS_MEDIA_BUCKET: ${{ secrets.AWS_MEDIA_BUCKET }}
+          AWS_DOCUMENTS_BUCKET: ${{ secrets.AWS_DOCUMENTS_BUCKET }}
+          AWS_ANDROID_BUCKET: torque-tech-android-builds-prod
+          AWS_BEDROCK_ACCESS_KEY_ID: ${{ secrets.AWS_BEDROCK_ACCESS_KEY_ID }}
+          AWS_BEDROCK_SECRET_ACCESS_KEY: ${{ secrets.AWS_BEDROCK_SECRET_ACCESS_KEY }}
+          AWS_BEDROCK_GUARDRAIL_ID: ${{ secrets.AWS_BEDROCK_GUARDRAIL_ID }}
+          AWS_BEDROCK_GUARDRAIL_VERSION: ${{ secrets.AWS_BEDROCK_GUARDRAIL_VERSION }}
+          AI_KEYPAIR_SECRET_NAME: ${{ secrets.AI_KEYPAIR_SECRET_NAME }}
+          AI_LOG_GROUP_NAME: ${{ secrets.AI_LOG_GROUP_NAME }}
+          FROM_EMAIL: ${{ secrets.FROM_EMAIL }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          MICROSOFT_CLIENT_ID: ${{ secrets.MICROSOFT_CLIENT_ID }}
+          APPLE_CLIENT_ID: ${{ secrets.APPLE_CLIENT_ID }}
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          STRIPE_STANDARD_PRICE_ID: ${{ secrets.STRIPE_STANDARD_PRICE_ID }}
+          STRIPE_PREMIUM_PRICE_ID: ${{ secrets.STRIPE_PREMIUM_PRICE_ID }}
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_PHONE_NUMBER: ${{ secrets.TWILIO_PHONE_NUMBER }}
+          XERO_CLIENT_ID: ${{ secrets.XERO_CLIENT_ID }}
+          XERO_CLIENT_SECRET: ${{ secrets.XERO_CLIENT_SECRET }}
+          XERO_WEBHOOK_KEY: ${{ secrets.XERO_WEBHOOK_KEY }}
+          QB_CLIENT_ID: ${{ secrets.QB_CLIENT_ID }}
+          QB_CLIENT_SECRET: ${{ secrets.QB_CLIENT_SECRET }}
+          QB_WEBHOOK_VERIFIER_TOKEN: ${{ secrets.QB_WEBHOOK_VERIFIER_TOKEN }}
+          ACCOUNTING_REDIRECT_BASE_URL: "https://${{ inputs.domain }}"
+          FRONTEND_URL: "https://${{ inputs.domain }}"
+          GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY }}
+          GH_SUPPORT_TOKEN: ${{ secrets.GH_SUPPORT_TOKEN }}
+          GH_SUPPORT_REPO: ${{ secrets.GH_SUPPORT_REPO }}
+
+      - name: Summary
+        run: |
+          {
+            echo "## 🚀 Production Deployment"
+            echo "**Status:** ✅ Deployed"
+            echo "**Commit:** ${{ needs.find-green-commit.outputs.sha }}"
+            echo "**URL:** https://${{ inputs.domain }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Failed
+        if: failure()
+        run: |
+          echo "## ❌ Production Deployment Failed" >> "$GITHUB_STEP_SUMMARY"
