@@ -1,0 +1,114 @@
+# Build a Docker image via buildx and push to a registry, with
+# multi-arch support and GitHub Actions cache.
+#
+# Wraps the canonical TT pattern (deploy-beta.yml uses this 3x for
+# api / web / backup; deploy-prod.yml uses it 1x for prod web):
+#
+#   - docker/setup-buildx-action@v3
+#   - docker/login-action@v3 (DockerHub by default; configurable)
+#   - docker/metadata-action@v5 (auto-tag with branch-sha + raw tags)
+#   - docker/build-push-action@v5 (with cache-from/cache-to via GHA cache)
+#
+# Lifted from torquetech .github/workflows/deploy-beta.yml +
+# deploy-prod.yml.
+
+name: Docker buildx + push
+description: 'buildx + multi-arch build + push to DockerHub (or other registry) with GHA cache'
+
+inputs:
+  image-name:
+    description: 'Image name without tag (e.g. chthonicsystems/torquetech-api)'
+    required: true
+  context:
+    description: 'Build context path'
+    required: false
+    default: '.'
+  dockerfile:
+    description: 'Dockerfile path (relative to context)'
+    required: false
+    default: 'Dockerfile'
+  tags:
+    description: 'Multiline list of tags (each on its own line) OR comma-separated single line'
+    required: false
+    default: ''
+  metadata-tags:
+    description: 'metadata-action tags input (multiline; takes precedence over `tags` when set)'
+    required: false
+    default: ''
+  build-args:
+    description: 'Multiline build-args (KEY=VALUE per line)'
+    required: false
+    default: ''
+  platforms:
+    description: 'Comma-separated platforms (e.g. linux/amd64,linux/arm64)'
+    required: false
+    default: ''
+  push:
+    description: "'true' to push; 'false' to build only"
+    required: false
+    default: 'true'
+  cache-scope:
+    description: 'GHA cache scope (used in cache-from/cache-to)'
+    required: true
+  registry:
+    description: 'Container registry to log into (default: DockerHub)'
+    required: false
+    default: 'docker.io'
+  registry-username:
+    description: 'Registry username (typically secrets.DOCKERHUB_USERNAME)'
+    required: false
+    default: ''
+  registry-password:
+    description: 'Registry password / token (typically secrets.DOCKERHUB_TOKEN)'
+    required: false
+    default: ''
+  skip-login:
+    description: "Skip docker/login-action ('true' | 'false'). Useful when caller already logged in."
+    required: false
+    default: 'false'
+
+outputs:
+  digest:
+    description: 'Pushed image digest'
+    value: ${{ steps.build.outputs.digest }}
+  imageid:
+    description: 'Local image id'
+    value: ${{ steps.build.outputs.imageid }}
+  metadata-tags:
+    description: 'Resolved tags (metadata-action output if used)'
+    value: ${{ steps.meta.outputs.tags }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to registry
+      if: inputs.skip-login != 'true'
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ inputs.registry-username }}
+        password: ${{ inputs.registry-password }}
+
+    - name: Extract image metadata
+      id: meta
+      if: inputs.metadata-tags != ''
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ inputs.image-name }}
+        tags: ${{ inputs.metadata-tags }}
+
+    - name: Build and push
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.context }}/${{ inputs.dockerfile }}
+        push: ${{ inputs.push }}
+        tags: ${{ inputs.metadata-tags != '' && steps.meta.outputs.tags || inputs.tags }}
+        build-args: ${{ inputs.build-args }}
+        platforms: ${{ inputs.platforms }}
+        cache-from: type=gha,scope=${{ inputs.cache-scope }}
+        cache-to: type=gha,mode=max,scope=${{ inputs.cache-scope }}
