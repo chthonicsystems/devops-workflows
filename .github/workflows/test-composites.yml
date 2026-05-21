@@ -36,3 +36,42 @@ jobs:
           dotnet nuget list source
           dotnet nuget list source | grep -q 'github-chthonic' || (echo "❌ chthonic NuGet source missing" >&2; exit 1)
           echo "✅ setup-dotnet-with-packages composite OK"
+
+  test-setup-node-with-packages:
+    name: setup-node-with-packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Create a fixture dir so the composite's package-lock.json cache key
+      # has something to hash against (we don't actually run `npm ci`).
+      - name: Create fixture working directory
+        shell: bash
+        run: |
+          mkdir -p fixture-web
+          cat > fixture-web/package.json <<'EOF'
+          {
+            "name": "fixture",
+            "version": "0.0.0",
+            "private": true
+          }
+          EOF
+          # actions/setup-node's cache require an existing lock file at the path.
+          touch fixture-web/package-lock.json
+
+      - name: Run composite (with GITHUB_TOKEN fallback, no cache for fixture)
+        uses: ./actions/setup-node-with-packages
+        with:
+          working-directory: fixture-web
+          enable-cache: 'false'
+          github-packages-pat: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify node version + npm scope mapping
+        shell: bash
+        run: |
+          node --version
+          npm --version
+          cat ~/.npmrc
+          grep -q '@chthonicsystems:registry=https://npm.pkg.github.com' ~/.npmrc \
+            || (echo "❌ npm scope mapping missing" >&2; exit 1)
+          echo "✅ setup-node-with-packages composite OK"

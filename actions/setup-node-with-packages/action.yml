@@ -1,0 +1,89 @@
+# Setup Node.js with Chthonic GitHub Packages npm registry auth.
+#
+# Wraps actions/setup-node@v4 with npm cache + scoped @chthonicsystems
+# registry mapped to GitHub Packages so cross-repo @chthonicsystems/*
+# package resolution works at install time. Same PAT precedence as
+# setup-dotnet-with-packages: caller passes the PAT explicitly.
+#
+# Lifted from torquetech .github/workflows/deploy-beta.yml (web image
+# build) + mobile workflows.
+
+name: Setup Node.js with GitHub Packages
+description: 'actions/setup-node@v4 + Chthonic @chthonicsystems npm registry auth + npm cache'
+
+inputs:
+  node-version:
+    description: 'Node.js version'
+    required: false
+    default: '22'
+  working-directory:
+    description: 'Working directory containing package-lock.json (used for cache key)'
+    required: false
+    default: 'web'
+  github-packages-pat:
+    description: 'PAT with read:packages scope (CHTHONIC_PACKAGES_PAT preferred; GITHUB_TOKEN fallback)'
+    required: true
+  registry-scope:
+    description: 'npm scope to map to GitHub Packages'
+    required: false
+    default: '@chthonicsystems'
+  registry-url:
+    description: 'GitHub Packages npm registry URL'
+    required: false
+    default: 'https://npm.pkg.github.com'
+  enable-cache:
+    description: 'Enable npm cache via actions/setup-node cache'
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node.js (with cache)
+      if: inputs.enable-cache == 'true'
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: 'npm'
+        cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+        registry-url: ${{ inputs.registry-url }}
+        scope: ${{ inputs.registry-scope }}
+
+    - name: Setup Node.js (no cache)
+      if: inputs.enable-cache != 'true'
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        registry-url: ${{ inputs.registry-url }}
+        scope: ${{ inputs.registry-scope }}
+
+    - name: Verify @chthonicsystems registry mapping
+      shell: bash
+      env:
+        REGISTRY_SCOPE: ${{ inputs.registry-scope }}
+        REGISTRY_URL: ${{ inputs.registry-url }}
+      run: |
+        # actions/setup-node writes ~/.npmrc with the scope→registry mapping
+        # plus an _authToken line consuming $NODE_AUTH_TOKEN at install time.
+        # Verify the mapping landed.
+        if grep -q "${REGISTRY_SCOPE}:registry=${REGISTRY_URL}" ~/.npmrc 2>/dev/null; then
+          echo "✅ npm scope mapping registered: ${REGISTRY_SCOPE} → ${REGISTRY_URL}"
+        else
+          echo "❌ npm scope mapping missing in ~/.npmrc" >&2
+          cat ~/.npmrc 2>/dev/null || true
+          exit 1
+        fi
+
+    - name: Configure NODE_AUTH_TOKEN env var for downstream npm steps
+      shell: bash
+      env:
+        GITHUB_PACKAGES_PAT: ${{ inputs.github-packages-pat }}
+      run: |
+        # Subsequent steps in the calling workflow that run `npm ci` /
+        # `npm install` / `npm publish` must have NODE_AUTH_TOKEN in their
+        # env. We can't set it for them from inside a composite action
+        # (env: at composite scope only applies to composite's own steps),
+        # so we expose it via $GITHUB_ENV which IS visible to subsequent
+        # job steps.
+        echo "NODE_AUTH_TOKEN=${GITHUB_PACKAGES_PAT}" >> "$GITHUB_ENV"
+        echo "✅ NODE_AUTH_TOKEN exported to job env"
