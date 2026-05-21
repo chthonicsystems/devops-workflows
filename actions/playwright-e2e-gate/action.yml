@@ -96,6 +96,15 @@ inputs:
     description: 'Title for the $GITHUB_STEP_SUMMARY block'
     required: false
     default: '🎭 E2E Test Results'
+  github-packages-pat:
+    description: |
+      PAT for resolving private @chthonicsystems/* packages during
+      npm install. Falls back to GITHUB_TOKEN inside the install step
+      when omitted. Plumbed because TT's root .npmrc references
+      ${GITHUB_PACKAGES_PAT} for the new @chthonicsystems/devops-scripts
+      dep (PR 27) — without it npm install hits 401 from npm.pkg.github.com.
+    required: false
+    default: ''
 
 runs:
   using: composite
@@ -104,10 +113,20 @@ runs:
       uses: actions/setup-node@v4
       with:
         node-version: ${{ inputs.node-version }}
+        registry-url: 'https://npm.pkg.github.com'
+        scope: '@chthonicsystems'
 
     - name: Install dependencies
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        # Two env-vars because consumer .npmrc files reference whichever
+        # convention they were authored under:
+        #   - NODE_AUTH_TOKEN: actions/setup-node's canonical convention
+        #   - GITHUB_PACKAGES_PAT: TT's root .npmrc convention (matches
+        #     web/.npmrc which existed before setup-node was used)
+        NODE_AUTH_TOKEN: ${{ inputs.github-packages-pat || github.token }}
+        GITHUB_PACKAGES_PAT: ${{ inputs.github-packages-pat || github.token }}
       run: ${{ inputs.install-command }}
 
     - name: Install Playwright browsers

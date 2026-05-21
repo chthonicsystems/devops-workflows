@@ -102,3 +102,8 @@ jobs:
           report-name: ${{ inputs.report-name }}
           report-retention-days: ${{ inputs.report-retention-days }}
           summary-title: ${{ inputs.summary-title }}
+          # PR 27 fix-forward: TT root .npmrc references @chthonicsystems
+          # private scope (devops-scripts dep). Plumb a PAT through so
+          # npm install can authenticate to npm.pkg.github.com.
+          # CHTHONIC_PACKAGES_PAT (from caller) when set, GITHUB_TOKEN otherwise.
+          github-packages-pat: ${{ secrets.CHTHONIC_PACKAGES_PAT || secrets.GITHUB_TOKEN }}
