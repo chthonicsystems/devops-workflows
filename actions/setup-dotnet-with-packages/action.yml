@@ -24,9 +24,9 @@ inputs:
     required: false
     default: '9.0.x'
   github-username:
-    description: 'GitHub username for Packages auth (typically ${{ github.actor }})'
+    description: 'GitHub username for Packages auth (defaults to runner GITHUB_ACTOR)'
     required: false
-    default: ${{ github.actor }}
+    default: ''
   github-packages-pat:
     description: 'PAT with read:packages scope (CHTHONIC_PACKAGES_PAT preferred; GITHUB_TOKEN fallback)'
     required: true
@@ -50,11 +50,17 @@ runs:
     - name: Register Chthonic GitHub Packages NuGet source
       shell: bash
       env:
-        GITHUB_USERNAME: ${{ inputs.github-username }}
+        GITHUB_USERNAME_INPUT: ${{ inputs.github-username }}
         GITHUB_PACKAGES_PAT: ${{ inputs.github-packages-pat }}
         SOURCE_NAME: ${{ inputs.source-name }}
         SOURCE_URL: ${{ inputs.source-url }}
       run: |
+        # Resolve the GitHub username: explicit input wins; otherwise fall back
+        # to the runner-provided GITHUB_ACTOR. This dance is needed because
+        # composite-action input defaults can't reference the github.* context
+        # (TemplateValidationException at action load time).
+        GITHUB_USERNAME="${GITHUB_USERNAME_INPUT:-$GITHUB_ACTOR}"
+
         # Idempotent: if source already exists at this URL, skip registration.
         if dotnet nuget list source 2>/dev/null | grep -q "${SOURCE_URL}"; then
           echo "✅ Source already registered: ${SOURCE_URL}"
