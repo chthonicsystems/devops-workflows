@@ -1,0 +1,263 @@
+# Build Android AAB via Capacitor + Fastlane → Play Store internal track
+# (reusable workflow).
+#
+# Lifted from torquetech .github/workflows/deploy-android.yml (which itself
+# was lifted from chthonicsystems/mobile-shell-template in PR 25).
+#
+# Note: the upstream-trigger pattern (`on: workflow_run`) is intentionally
+# left to the caller workflow — reusable workflows can only declare
+# `on: workflow_call`. Callers wire workflow_run themselves and dispatch
+# this reusable workflow on success.
+#
+# Required caller secrets (forwarded via `secrets: inherit`):
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION
+#   AWS_S3_BUCKET_ANDROID            — AAB mirror bucket
+#   KEYSTORE_BASE64                  — base64 of release .keystore
+#   KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
+#   FIREBASE_SERVICE_ACCOUNT_JSON    — Google Play API service account JSON
+#   REACT_APP_GOOGLE_CLIENT_ID, REACT_APP_GOOGLE_IOS_CLIENT_ID
+#   REACT_APP_MICROSOFT_CLIENT_ID, REACT_APP_APPLE_CLIENT_ID
+#   CHTHONIC_PACKAGES_PAT            — optional; falls back to GITHUB_TOKEN
+
+name: Mobile build (Android, reusable)
+
+on:
+  workflow_call:
+    inputs:
+      upstream-workflow-file:
+        description: 'Upstream workflow used for find-green check'
+        type: string
+        required: false
+        default: 'deploy-beta.yml'
+      caller-workflow-file:
+        description: "Caller's workflow file (typically deploy-android.yml)"
+        type: string
+        required: false
+        default: 'deploy-android.yml'
+      working-directory:
+        description: 'Repo subdir containing package.json + capacitor.config + android/'
+        type: string
+        required: false
+        default: 'web'
+      app-version-json-path:
+        description: 'Path to web/app_version.json relative to repo root'
+        type: string
+        required: false
+        default: 'web/app_version.json'
+      branch:
+        description: 'Branch to look up upstream successful runs on'
+        type: string
+        required: false
+        default: 'main'
+      runs-on:
+        description: 'Runner image'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+      java-version:
+        description: 'Temurin Java version for Gradle'
+        type: string
+        required: false
+        default: '21'
+      ruby-version:
+        description: 'Ruby version for Fastlane'
+        type: string
+        required: false
+        default: '3.2'
+      node-version:
+        description: 'Node.js version'
+        type: string
+        required: false
+        default: '22'
+      fastlane-lane:
+        description: "Fastlane lane to invoke (e.g. 'android internal')"
+        type: string
+        required: false
+        default: 'android internal'
+
+permissions:
+  actions: read
+  contents: read
+  packages: read
+
+env:
+  AWS_ANDROID_BUCKET: ${{ secrets.AWS_S3_BUCKET_ANDROID }}
+  GITHUB_USERNAME: ${{ github.actor }}
+  GITHUB_PACKAGES_PAT: ${{ secrets.CHTHONIC_PACKAGES_PAT || secrets.GITHUB_TOKEN }}
+
+jobs:
+  find-green-commit:
+    runs-on: ${{ inputs.runs-on }}
+    outputs:
+      sha: ${{ steps.find.outputs.sha }}
+      should_build: ${{ steps.find.outputs.should_proceed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find last-green upstream commit
+        id: find
+        uses: chthonicsystems/devops-workflows/actions/find-green-beta-commit@main
+        with:
+          upstream-workflow-file: ${{ inputs.upstream-workflow-file }}
+          caller-workflow-file: ${{ inputs.caller-workflow-file }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ inputs.branch }}
+          fail-on-no-upstream: 'false'
+
+  build-android:
+    needs: find-green-commit
+    if: needs.find-green-commit.outputs.should_build == 'true'
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - name: Checkout green commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.find-green-commit.outputs.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Read version
+        id: version
+        env:
+          APP_VERSION_JSON: ${{ inputs.app-version-json-path }}
+          WORKING_DIR: ${{ inputs.working-directory }}
+        run: |
+          VERSION=$(node -e "const d=require('./${APP_VERSION_JSON}');const v=d[d.latest];console.log(v.android?.version||d.latest);")
+          VERSION_CODE=$(node -e "const d = require('./${APP_VERSION_JSON}'); const v = d[d.latest]; console.log(v.android?.versionCode || v.versionCode);")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "versionCode=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Check if AAB already exists in S3
+        id: check
+        run: |
+          if aws s3 ls "s3://${{ env.AWS_ANDROID_BUCKET }}/v${{ steps.version.outputs.version }}/release.aab" 2>/dev/null; then
+            echo "✅ v${{ steps.version.outputs.version }} already in S3, skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "🔨 v${{ steps.version.outputs.version }} not found, building"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Java
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ inputs.java-version }}
+
+      - name: Setup Ruby
+        if: steps.check.outputs.skip == 'false'
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ inputs.ruby-version }}
+          bundler-cache: true
+
+      - name: Decode keystore
+        if: steps.check.outputs.skip == 'false'
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > /tmp/release.keystore
+
+      - name: Patch build.gradle versionCode + versionName
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          cd ${{ inputs.working-directory }}
+          sed -i "s/versionCode .*/versionCode ${{ steps.version.outputs.versionCode }}/" android/app/build.gradle
+          sed -i "s/versionName .*/versionName \"${{ steps.version.outputs.version }}\"/" android/app/build.gradle
+
+      - name: Install web dependencies + build + cap sync
+        if: steps.check.outputs.skip == 'false'
+        env:
+          REACT_APP_GOOGLE_CLIENT_ID: ${{ secrets.REACT_APP_GOOGLE_CLIENT_ID }}
+          REACT_APP_GOOGLE_IOS_CLIENT_ID: ${{ secrets.REACT_APP_GOOGLE_IOS_CLIENT_ID }}
+          REACT_APP_MICROSOFT_CLIENT_ID: ${{ secrets.REACT_APP_MICROSOFT_CLIENT_ID }}
+          REACT_APP_APPLE_CLIENT_ID: ${{ secrets.REACT_APP_APPLE_CLIENT_ID }}
+          REACT_APP_VERSION: ${{ steps.version.outputs.version }}
+          NODE_ENV: production
+        run: |
+          cd ${{ inputs.working-directory }}
+          npm ci --include=dev
+          ./node_modules/.bin/ionic build
+          ./node_modules/.bin/cap sync android
+
+      - name: Sync app version to native
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          cd ${{ inputs.working-directory }}
+          npx mobile-runtime sync-version --platform android
+
+      - name: Build + upload AAB via Fastlane
+        if: steps.check.outputs.skip == 'false'
+        env:
+          KEYSTORE_PATH: /tmp/release.keystore
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: bundle exec fastlane ${{ inputs.fastlane-lane }}
+
+      - name: Mirror AAB to S3 (versioned + LATEST)
+        if: steps.check.outputs.skip == 'false'
+        env:
+          WORKING_DIR: ${{ inputs.working-directory }}
+        run: |
+          aws s3 cp "${WORKING_DIR}/android/app/build/outputs/bundle/release/app-release.aab" \
+            "s3://${{ env.AWS_ANDROID_BUCKET }}/v${{ steps.version.outputs.version }}/release.aab" \
+            --content-type application/octet-stream
+          aws s3 cp "${WORKING_DIR}/android/app/build/outputs/bundle/release/app-release.aab" \
+            "s3://${{ env.AWS_ANDROID_BUCKET }}/LATEST/release.aab" \
+            --content-type application/octet-stream
+
+      - name: Summary
+        run: |
+          if [ "${{ steps.check.outputs.skip }}" = "true" ]; then
+            {
+              echo "## 📱 Android Build — Skipped"
+              echo "v${{ steps.version.outputs.version }} already exists in S3"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## 📱 Android Build — Built + Uploaded to Play Store"
+              echo "**Version:** ${{ steps.version.outputs.version }} (code: ${{ steps.version.outputs.versionCode }})"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  cleanup-on-failure:
+    needs: [find-green-commit, build-android]
+    if: failure() && needs.find-green-commit.outputs.should_build == 'true'
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - name: Checkout green commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.find-green-commit.outputs.sha }}
+          sparse-checkout: ${{ inputs.app-version-json-path }}
+          sparse-checkout-cone-mode: false
+
+      - name: Read version
+        id: version
+        env:
+          APP_VERSION_JSON: ${{ inputs.app-version-json-path }}
+        run: |
+          VERSION=$(node -e "const d = require('./${APP_VERSION_JSON}'); console.log(d.latest);")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Delete AAB from S3
+        run: |
+          echo "🧹 Cleaning up failed build artifact"
+          aws s3 rm "s3://${{ env.AWS_ANDROID_BUCKET }}/v${{ steps.version.outputs.version }}/release.aab" || true
+          aws s3 rm "s3://${{ env.AWS_ANDROID_BUCKET }}/LATEST/release.aab" || true
