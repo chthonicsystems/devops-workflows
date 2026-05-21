@@ -1,0 +1,110 @@
+# SSH into a remote host and run a deploy script with bulk env-var
+# passthrough.
+#
+# Wraps appleboy/ssh-action@v1.0.3 with the standard pattern used by
+# TorqueTech deploy workflows:
+#
+#   1. SSH into ${host} as ${username} with ${ssh-key}
+#   2. cd into ${working-directory} (server-side)
+#   3. Optionally git pull / git checkout to align with the caller commit
+#   4. Run ${script-path} (typically ./scripts/deploy-github.sh)
+#   5. Pass ${envs} (comma-separated names) through to the remote script's env
+#
+# The actual env-var VALUES must be present in the caller job's env:
+# block (or as runner-level env). This composite only passes the
+# NAMES list to appleboy/ssh-action's envs: input — that's how
+# appleboy/ssh-action selects which runner env vars to forward.
+#
+# Lifted from torquetech .github/workflows/deploy-beta.yml +
+# deploy-prod.yml + deploy-monitoring.yml + ssl-setup-beta job.
+
+name: Appleboy SSH with bulk env passthrough
+description: 'Run a remote script over SSH with comma-separated env-var name passthrough'
+
+inputs:
+  host:
+    description: 'SSH host (typically secrets.DO_HOST)'
+    required: true
+  username:
+    description: 'SSH username (typically secrets.DO_USER)'
+    required: true
+  ssh-key:
+    description: 'SSH private key (typically secrets.DO_SSH_KEY)'
+    required: true
+  command-timeout:
+    description: 'Total command timeout (e.g. 15m)'
+    required: false
+    default: '15m'
+  envs:
+    description: 'Comma-separated list of env-var NAMES to forward to the remote script'
+    required: false
+    default: ''
+  working-directory:
+    description: 'Server-side directory to cd into before invoking the script'
+    required: false
+    default: '/opt/torquetech'
+  git-mode:
+    description: "How to align the server-side checkout: 'pull' | 'checkout-sha' | 'none'"
+    required: false
+    default: 'pull'
+  git-branch:
+    description: "Branch name when git-mode='pull'"
+    required: false
+    default: 'main'
+  git-sha:
+    description: "Commit SHA when git-mode='checkout-sha' (required in that mode)"
+    required: false
+    default: ''
+  script-path:
+    description: "Server-side path (relative to working-directory) of the script to invoke"
+    required: true
+  script-args:
+    description: 'Optional extra args appended to the script invocation'
+    required: false
+    default: ''
+  pre-script-commands:
+    description: 'Optional bash commands to run before the script invocation'
+    required: false
+    default: ''
+  post-script-commands:
+    description: 'Optional bash commands to run after the script invocation'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: SSH and run deploy script
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ inputs.host }}
+        username: ${{ inputs.username }}
+        key: ${{ inputs.ssh-key }}
+        command_timeout: ${{ inputs.command-timeout }}
+        envs: ${{ inputs.envs }}
+        script: |
+          set -e
+          cd "${{ inputs.working-directory }}"
+          case "${{ inputs.git-mode }}" in
+            pull)
+              git pull origin "${{ inputs.git-branch }}"
+              ;;
+            checkout-sha)
+              if [ -z "${{ inputs.git-sha }}" ]; then
+                echo "::error::git-mode=checkout-sha requires git-sha input" >&2
+                exit 1
+              fi
+              git fetch origin "${{ inputs.git-branch }}"
+              git checkout "${{ inputs.git-sha }}"
+              ;;
+            none)
+              echo "ℹ️ Skipping git alignment (git-mode=none)"
+              ;;
+            *)
+              echo "::error::Unknown git-mode: ${{ inputs.git-mode }} (expected pull|checkout-sha|none)" >&2
+              exit 1
+              ;;
+          esac
+          ${{ inputs.pre-script-commands }}
+          "${{ inputs.script-path }}" ${{ inputs.script-args }}
+          ${{ inputs.post-script-commands }}

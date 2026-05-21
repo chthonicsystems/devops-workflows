@@ -120,3 +120,19 @@ jobs:
             *) echo "❌ should_proceed has unexpected shape: ${OUT_PROCEED}" >&2; exit 1 ;;
           esac
           echo "✅ find-green-beta-commit composite OK"
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run actionlint on workflows + composite actions
+        shell: bash
+        run: |
+          # actionlint validates YAML schema + expression syntax for every
+          # action.yml + workflow file. Catches issues that would only
+          # surface at composite load time on real runners.
+          curl -sSL "https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash" -o download-actionlint.bash
+          bash download-actionlint.bash 1.7.7
+          ./actionlint -color
+          echo "✅ actionlint clean across .github/workflows + actions"
