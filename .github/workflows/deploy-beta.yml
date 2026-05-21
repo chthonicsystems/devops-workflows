@@ -1,0 +1,328 @@
+# Deploy beta (reusable workflow).
+#
+# Full beta-deploy chain lifted from torquetech .github/workflows/deploy-beta.yml.
+# Four jobs:
+#
+#   1. build-and-push    — docker buildx build + push (api / web / backup)
+#   2. ssl-setup-beta    — bootstrap SSL via ./scripts/setup-ssl-github.sh
+#   3. deploy-beta       — SSH deploy via ./scripts/deploy-github.sh
+#   4. playwright-e2e    — call e2e-gate.yml reusable workflow
+#
+# Per-RFC 0019 § 3 option 3a, this workflow uses `secrets: inherit` —
+# caller's secret store flows through transparently. Required caller
+# secrets:
+#
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION
+#   AWS_BEDROCK_ACCESS_KEY_ID, AWS_BEDROCK_SECRET_ACCESS_KEY
+#   AWS_BEDROCK_GUARDRAIL_ID, AWS_BEDROCK_GUARDRAIL_VERSION
+#   AWS_DOCUMENTS_BUCKET, AWS_MEDIA_BUCKET
+#   AI_KEYPAIR_SECRET_NAME, AI_LOG_GROUP_NAME
+#   APPLE_CLIENT_ID
+#   CHTHONIC_PACKAGES_PAT          (optional, falls back to GITHUB_TOKEN)
+#   DO_HOST, DO_USER, DO_SSH_KEY
+#   DOCKERHUB_USERNAME, DOCKERHUB_TOKEN
+#   DOMAIN, SSL_EMAIL
+#   E2E_ADMIN_USERNAME, E2E_ADMIN_PASSWORD
+#   FIREBASE_API_KEY, FIREBASE_APP_ID, FIREBASE_AUTH_DOMAIN
+#   FIREBASE_MESSAGING_SENDER_ID, FIREBASE_PROJECT_ID
+#   FIREBASE_SERVICE_ACCOUNT_JSON, FIREBASE_STORAGE_BUCKET
+#   FIREBASE_VAPID_KEY
+#   FROM_EMAIL
+#   GH_SUPPORT_TOKEN, GH_SUPPORT_REPO       (optional)
+#   GOOGLE_CLIENT_ID, GOOGLE_PLACES_API_KEY
+#   JWT_SECRET
+#   MICROSOFT_CLIENT_ID
+#   MYSQL_PASSWORD, MYSQL_ROOT_PASSWORD
+#   QB_CLIENT_ID, QB_CLIENT_SECRET, QB_WEBHOOK_VERIFIER_TOKEN
+#   RUN_MIGRATIONS
+#   S3_BACKUP_BUCKET
+#   STRIPE_*
+#   TWILIO_*
+#   XERO_*
+#
+# Optional caller vars:
+#   vars.CRM_DOMAIN  — passed to setup-ssl-github.sh for CRM cert provisioning
+
+name: Deploy beta (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      domain:
+        description: 'Beta domain (e.g. torquetech-beta.chthonicsystems.com)'
+        type: string
+        required: true
+      docker-image-prefix:
+        description: 'Image-name prefix (e.g. chthonicsystems/torquetech)'
+        type: string
+        required: true
+      web-image-tag:
+        description: "Tag for the web image (e.g. 'beta')"
+        type: string
+        required: false
+        default: 'beta'
+      e2e-spec-glob:
+        description: 'Optional glob passed to npx playwright test'
+        type: string
+        required: false
+        default: ''
+      working-directory:
+        description: 'Server-side working directory'
+        type: string
+        required: false
+        default: '/opt/torquetech'
+      ssl-script:
+        description: 'Server-side SSL setup script (relative to working-directory)'
+        type: string
+        required: false
+        default: './scripts/setup-ssl-github.sh'
+      deploy-script:
+        description: 'Server-side deploy script (relative to working-directory)'
+        type: string
+        required: false
+        default: './scripts/deploy-github.sh'
+      git-branch:
+        description: 'Branch to git pull on the server before deploy'
+        type: string
+        required: false
+        default: 'main'
+      api-context:
+        description: 'Build context for the API image'
+        type: string
+        required: false
+        default: './api'
+      web-context:
+        description: 'Build context for the web image'
+        type: string
+        required: false
+        default: './web'
+      backup-context:
+        description: 'Build context for the backup image'
+        type: string
+        required: false
+        default: './backup'
+      app-version-json-path:
+        description: 'Repo path to web/app_version.json (used for REACT_APP_VERSION build arg)'
+        type: string
+        required: false
+        default: 'web/app_version.json'
+      runner-environment:
+        description: 'GitHub Environment name to scope runs (typically beta)'
+        type: string
+        required: false
+        default: 'beta'
+      runs-on:
+        description: 'Runner image'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+      ssh-command-timeout:
+        description: 'SSH command timeout for deploy step'
+        type: string
+        required: false
+        default: '15m'
+
+env:
+  GITHUB_USERNAME: ${{ github.actor }}
+  GITHUB_PACKAGES_PAT: ${{ secrets.CHTHONIC_PACKAGES_PAT || secrets.GITHUB_TOKEN }}
+
+jobs:
+  build-and-push:
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.runner-environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET with Chthonic packages
+        uses: chthonicsystems/devops-workflows/actions/setup-dotnet-with-packages@main
+        with:
+          github-packages-pat: ${{ secrets.CHTHONIC_PACKAGES_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Run API tests
+        env:
+          GITHUB_USERNAME: ${{ env.GITHUB_USERNAME }}
+          GITHUB_PACKAGES_PAT: ${{ env.GITHUB_PACKAGES_PAT }}
+        run: cd api && dotnet test --verbosity minimal
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Read app version
+        id: app-version
+        env:
+          APP_VERSION_JSON: ${{ inputs.app-version-json-path }}
+        run: |
+          VERSION=$(node -e "const d = require('./${APP_VERSION_JSON}'); console.log(d.latest);")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push API image
+        uses: chthonicsystems/devops-workflows/actions/docker-buildx-push@main
+        with:
+          image-name: ${{ inputs.docker-image-prefix }}-api
+          context: ${{ inputs.api-context }}
+          metadata-tags: |
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest
+          build-args: |
+            GITHUB_USERNAME=${{ env.GITHUB_USERNAME }}
+            GITHUB_PACKAGES_PAT=${{ env.GITHUB_PACKAGES_PAT }}
+          cache-scope: api
+          registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Beta Web image
+        uses: chthonicsystems/devops-workflows/actions/docker-buildx-push@main
+        with:
+          image-name: ${{ inputs.docker-image-prefix }}-web
+          context: ${{ inputs.web-context }}
+          tags: ${{ inputs.docker-image-prefix }}-web:${{ inputs.web-image-tag }}
+          build-args: |
+            GITHUB_PACKAGES_PAT=${{ env.GITHUB_PACKAGES_PAT }}
+            REACT_APP_VERSION=${{ steps.app-version.outputs.version }}
+            REACT_APP_API_URL=https://${{ inputs.domain }}
+            REACT_APP_GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}
+            REACT_APP_MICROSOFT_CLIENT_ID=${{ secrets.MICROSOFT_CLIENT_ID }}
+            REACT_APP_APPLE_CLIENT_ID=${{ secrets.APPLE_CLIENT_ID }}
+            REACT_APP_FIREBASE_API_KEY=${{ secrets.FIREBASE_API_KEY }}
+            REACT_APP_FIREBASE_AUTH_DOMAIN=${{ secrets.FIREBASE_AUTH_DOMAIN }}
+            REACT_APP_FIREBASE_PROJECT_ID=${{ secrets.FIREBASE_PROJECT_ID }}
+            REACT_APP_FIREBASE_STORAGE_BUCKET=${{ secrets.FIREBASE_STORAGE_BUCKET }}
+            REACT_APP_FIREBASE_MESSAGING_SENDER_ID=${{ secrets.FIREBASE_MESSAGING_SENDER_ID }}
+            REACT_APP_FIREBASE_APP_ID=${{ secrets.FIREBASE_APP_ID }}
+            REACT_APP_FIREBASE_VAPID_KEY=${{ secrets.FIREBASE_VAPID_KEY }}
+          cache-scope: web-beta
+          registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          skip-login: 'true'
+
+      - name: Build and push Backup image
+        uses: chthonicsystems/devops-workflows/actions/docker-buildx-push@main
+        with:
+          image-name: ${{ inputs.docker-image-prefix }}-backup
+          context: ${{ inputs.backup-context }}
+          metadata-tags: |
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest
+          cache-scope: backup
+          registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          skip-login: 'true'
+
+  ssl-setup-beta:
+    needs: build-and-push
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.runner-environment }}
+    steps:
+      - name: Setup SSL certificates on beta
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          envs: DOMAIN,SSL_EMAIL,CRM_DOMAIN
+          script: |
+            set -e
+            cd ${{ inputs.working-directory }}
+            git pull origin ${{ inputs.git-branch }}
+            ${{ inputs.ssl-script }}
+        env:
+          DOMAIN: ${{ inputs.domain }}
+          SSL_EMAIL: ${{ secrets.SSL_EMAIL }}
+          CRM_DOMAIN: ${{ vars.CRM_DOMAIN }}
+
+  deploy-beta:
+    needs: ssl-setup-beta
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.runner-environment }}
+    steps:
+      - name: Deploy to beta server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          command_timeout: ${{ inputs.ssh-command-timeout }}
+          envs: API_IMAGE,WEB_IMAGE,BACKUP_IMAGE,DOMAIN,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN,MYSQL_ROOT_PASSWORD,MYSQL_PASSWORD,JWT_SECRET,RUN_MIGRATIONS,FIREBASE_SERVICE_ACCOUNT_JSON,FIREBASE_PROJECT_ID,AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_REGION,S3_BACKUP_BUCKET,AWS_MEDIA_BUCKET,AWS_DOCUMENTS_BUCKET,AWS_ANDROID_BUCKET,AWS_BEDROCK_ACCESS_KEY_ID,AWS_BEDROCK_SECRET_ACCESS_KEY,AWS_BEDROCK_GUARDRAIL_ID,AWS_BEDROCK_GUARDRAIL_VERSION,AI_KEYPAIR_SECRET_NAME,AI_LOG_GROUP_NAME,FROM_EMAIL,GOOGLE_CLIENT_ID,MICROSOFT_CLIENT_ID,APPLE_CLIENT_ID,STRIPE_SECRET_KEY,STRIPE_WEBHOOK_SECRET,STRIPE_STANDARD_PRICE_ID,STRIPE_PREMIUM_PRICE_ID,TWILIO_ACCOUNT_SID,TWILIO_AUTH_TOKEN,TWILIO_PHONE_NUMBER,XERO_CLIENT_ID,XERO_CLIENT_SECRET,XERO_WEBHOOK_KEY,QB_CLIENT_ID,QB_CLIENT_SECRET,QB_WEBHOOK_VERIFIER_TOKEN,ACCOUNTING_REDIRECT_BASE_URL,FRONTEND_URL,WEB_IMAGE_TAG,SKIP_BACKUP,GOOGLE_PLACES_API_KEY,GH_SUPPORT_TOKEN,GH_SUPPORT_REPO
+          script: |
+            set -e
+            cd ${{ inputs.working-directory }}
+            git pull origin ${{ inputs.git-branch }}
+            ${{ inputs.deploy-script }}
+        env:
+          API_IMAGE: ${{ inputs.docker-image-prefix }}-api
+          WEB_IMAGE: ${{ inputs.docker-image-prefix }}-web
+          BACKUP_IMAGE: ${{ inputs.docker-image-prefix }}-backup
+          DOMAIN: ${{ inputs.domain }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          RUN_MIGRATIONS: ${{ secrets.RUN_MIGRATIONS }}
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET }}
+          AWS_MEDIA_BUCKET: ${{ secrets.AWS_MEDIA_BUCKET }}
+          AWS_DOCUMENTS_BUCKET: ${{ secrets.AWS_DOCUMENTS_BUCKET }}
+          AWS_ANDROID_BUCKET: torque-tech-android-builds-prod
+          AWS_BEDROCK_ACCESS_KEY_ID: ${{ secrets.AWS_BEDROCK_ACCESS_KEY_ID }}
+          AWS_BEDROCK_SECRET_ACCESS_KEY: ${{ secrets.AWS_BEDROCK_SECRET_ACCESS_KEY }}
+          AWS_BEDROCK_GUARDRAIL_ID: ${{ secrets.AWS_BEDROCK_GUARDRAIL_ID }}
+          AWS_BEDROCK_GUARDRAIL_VERSION: ${{ secrets.AWS_BEDROCK_GUARDRAIL_VERSION }}
+          AI_KEYPAIR_SECRET_NAME: ${{ secrets.AI_KEYPAIR_SECRET_NAME }}
+          AI_LOG_GROUP_NAME: ${{ secrets.AI_LOG_GROUP_NAME }}
+          FROM_EMAIL: ${{ secrets.FROM_EMAIL }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          MICROSOFT_CLIENT_ID: ${{ secrets.MICROSOFT_CLIENT_ID }}
+          APPLE_CLIENT_ID: ${{ secrets.APPLE_CLIENT_ID }}
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          STRIPE_STANDARD_PRICE_ID: ${{ secrets.STRIPE_STANDARD_PRICE_ID }}
+          STRIPE_PREMIUM_PRICE_ID: ${{ secrets.STRIPE_PREMIUM_PRICE_ID }}
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_PHONE_NUMBER: ${{ secrets.TWILIO_PHONE_NUMBER }}
+          XERO_CLIENT_ID: ${{ secrets.XERO_CLIENT_ID }}
+          XERO_CLIENT_SECRET: ${{ secrets.XERO_CLIENT_SECRET }}
+          XERO_WEBHOOK_KEY: ${{ secrets.XERO_WEBHOOK_KEY }}
+          QB_CLIENT_ID: ${{ secrets.QB_CLIENT_ID }}
+          QB_CLIENT_SECRET: ${{ secrets.QB_CLIENT_SECRET }}
+          QB_WEBHOOK_VERIFIER_TOKEN: ${{ secrets.QB_WEBHOOK_VERIFIER_TOKEN }}
+          ACCOUNTING_REDIRECT_BASE_URL: "https://${{ inputs.domain }}"
+          FRONTEND_URL: "https://${{ inputs.domain }}"
+          GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY }}
+          GH_SUPPORT_TOKEN: ${{ secrets.GH_SUPPORT_TOKEN }}
+          GH_SUPPORT_REPO: ${{ secrets.GH_SUPPORT_REPO }}
+          WEB_IMAGE_TAG: ${{ inputs.web-image-tag }}
+          SKIP_BACKUP: "true"
+
+      - name: Beta deployment summary
+        run: |
+          {
+            echo "## 🚀 Beta Deployment"
+            echo "**Status:** ✅ Deployed to beta"
+            echo "**URL:** https://${{ inputs.domain }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Beta deployment failed
+        if: failure()
+        run: |
+          echo "## ❌ Beta Deployment Failed" >> "$GITHUB_STEP_SUMMARY"
+
+  playwright-e2e-beta:
+    needs: deploy-beta
+    uses: chthonicsystems/devops-workflows/.github/workflows/e2e-gate.yml@main
+    with:
+      base-url: https://${{ inputs.domain }}
+      spec-glob: ${{ inputs.e2e-spec-glob }}
+      report-name: playwright-report-beta
+      summary-title: '🎭 Beta E2E Test Results'
+      runner-environment: ${{ inputs.runner-environment }}
+    secrets: inherit
