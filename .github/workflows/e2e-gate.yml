@@ -1,0 +1,104 @@
+# E2E gate (reusable workflow).
+#
+# Standalone Playwright runner. Caller provides base-url + secrets via
+# `secrets: inherit`. Used as a `needs: deploy` step in deploy-beta.yml
+# and can also be called directly for ad-hoc gates against any
+# environment.
+#
+# Required caller secrets (forwarded via `secrets: inherit`):
+#   E2E_ADMIN_USERNAME    — seed admin user for readiness probe + spec auth
+#   E2E_ADMIN_PASSWORD    — seed admin password
+#
+# Per-RFC 0019 § 3, this workflow uses `secrets: inherit` (option 3a) —
+# the caller's secret store flows through transparently. Document the
+# expected secrets here in this header + in docs/REUSABLE-WORKFLOWS.md
+# so consumers know what to define at the GitHub Environment level.
+
+name: E2E gate (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      base-url:
+        description: 'Target environment URL (e.g. https://torquetech-beta.chthonicsystems.com)'
+        type: string
+        required: true
+      spec-glob:
+        description: 'Optional glob passed to npx playwright test'
+        type: string
+        required: false
+        default: ''
+      working-directory:
+        description: 'Repo subdirectory containing package.json + playwright.config'
+        type: string
+        required: false
+        default: '.'
+      install-command:
+        description: "How to install deps ('npm install' | 'npm ci' | 'npm install --no-audit')"
+        type: string
+        required: false
+        default: 'npm install'
+      browsers:
+        description: 'Browsers to install (space-separated)'
+        type: string
+        required: false
+        default: 'chromium'
+      readiness-timeout-seconds:
+        description: 'Total readiness wait budget (seconds)'
+        type: string
+        required: false
+        default: '180'
+      skip-readiness:
+        description: "Skip the readiness probe ('true' | 'false')"
+        type: string
+        required: false
+        default: 'false'
+      report-name:
+        description: 'Uploaded artifact name'
+        type: string
+        required: false
+        default: 'playwright-report'
+      report-retention-days:
+        description: 'Artifact retention days'
+        type: string
+        required: false
+        default: '14'
+      summary-title:
+        description: 'Title for the $GITHUB_STEP_SUMMARY block'
+        type: string
+        required: false
+        default: '🎭 E2E Test Results'
+      runs-on:
+        description: 'Runner image'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+      runner-environment:
+        description: 'GitHub Environment name to run under (for env-scoped secrets)'
+        type: string
+        required: false
+        default: ''
+
+jobs:
+  e2e:
+    name: Playwright E2E
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.runner-environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Playwright E2E gate
+        uses: chthonicsystems/devops-workflows/actions/playwright-e2e-gate@main
+        with:
+          base-url: ${{ inputs.base-url }}
+          admin-username: ${{ secrets.E2E_ADMIN_USERNAME }}
+          admin-password: ${{ secrets.E2E_ADMIN_PASSWORD }}
+          readiness-timeout-seconds: ${{ inputs.readiness-timeout-seconds }}
+          skip-readiness: ${{ inputs.skip-readiness }}
+          working-directory: ${{ inputs.working-directory }}
+          install-command: ${{ inputs.install-command }}
+          browsers: ${{ inputs.browsers }}
+          spec-glob: ${{ inputs.spec-glob }}
+          report-name: ${{ inputs.report-name }}
+          report-retention-days: ${{ inputs.report-retention-days }}
+          summary-title: ${{ inputs.summary-title }}
