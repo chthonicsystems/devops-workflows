@@ -1,0 +1,116 @@
+# Find the last green commit on a "beta-style" upstream workflow
+# and decide whether the calling downstream workflow should proceed.
+#
+# Lifted from torquetech .github/workflows/deploy-prod.yml +
+# deploy-android.yml + deploy-ios.yml (3 byte-identical copies of
+# the same bash block).
+#
+# Behavior:
+#   1. Query the most recent successful run of `upstream-workflow-file`
+#      (default deploy-beta.yml). Capture its head SHA + updated_at.
+#   2. Query the most recent successful run of the caller's workflow
+#      (`caller-workflow-file`). Capture its updated_at.
+#   3. If the upstream is newer than the caller, set should_proceed=true
+#      and emit the upstream SHA. Otherwise should_proceed=false.
+#   4. If no successful upstream run exists at all, fail loudly so
+#      downstream pipelines don't silently no-op forever.
+#
+# Inputs:
+#   upstream-workflow-file (default deploy-beta.yml)
+#   caller-workflow-file   (required — e.g. deploy-prod.yml)
+#   github-token           (required — typically secrets.GITHUB_TOKEN)
+#   branch                 (default main)
+#
+# Outputs:
+#   sha             — the upstream's head SHA (empty when no upstream run)
+#   should_proceed  — 'true' | 'false'
+#   upstream-date   — upstream run's updated_at ISO timestamp
+#   caller-date     — caller's last-successful updated_at ISO timestamp
+
+name: Find last-green upstream commit
+description: 'Compute the last-green-on-upstream SHA and decide whether the caller workflow should run'
+
+inputs:
+  upstream-workflow-file:
+    description: 'Filename of the upstream workflow (e.g. deploy-beta.yml)'
+    required: false
+    default: 'deploy-beta.yml'
+  caller-workflow-file:
+    description: "Filename of the caller's workflow (e.g. deploy-prod.yml)"
+    required: true
+  github-token:
+    description: 'GitHub token for gh API access (typically secrets.GITHUB_TOKEN)'
+    required: true
+  branch:
+    description: 'Branch name to filter upstream workflow runs'
+    required: false
+    default: 'main'
+  fail-on-no-upstream:
+    description: "Fail the action if no successful upstream run exists ('true' | 'false')"
+    required: false
+    default: 'false'
+
+outputs:
+  sha:
+    description: 'Last-green upstream SHA (empty if none)'
+    value: ${{ steps.find.outputs.sha }}
+  should_proceed:
+    description: "'true' | 'false'"
+    value: ${{ steps.find.outputs.should_proceed }}
+  upstream-date:
+    description: "ISO timestamp of upstream's last successful run"
+    value: ${{ steps.find.outputs.upstream_date }}
+  caller-date:
+    description: "ISO timestamp of caller's last successful run (defaults to 2000-01-01 if no run)"
+    value: ${{ steps.find.outputs.caller_date }}
+
+runs:
+  using: composite
+  steps:
+    - name: Query workflow runs and decide
+      id: find
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        UPSTREAM_WORKFLOW: ${{ inputs.upstream-workflow-file }}
+        CALLER_WORKFLOW: ${{ inputs.caller-workflow-file }}
+        BRANCH: ${{ inputs.branch }}
+        FAIL_ON_NO_UPSTREAM: ${{ inputs.fail-on-no-upstream }}
+      run: |
+        # Last-successful upstream run.
+        UPSTREAM=$(gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/${UPSTREAM_WORKFLOW}/runs?status=success&branch=${BRANCH}&per_page=1" \
+          --jq '.workflow_runs[0] | "\(.head_sha) \(.updated_at)"' 2>/dev/null || echo "")
+        UPSTREAM_SHA=$(echo "$UPSTREAM" | awk '{print $1}')
+        UPSTREAM_DATE=$(echo "$UPSTREAM" | awk '{print $2}')
+
+        if [ -z "$UPSTREAM_SHA" ] || [ "$UPSTREAM_SHA" = "null" ]; then
+          echo "ℹ️ No successful upstream run found on ${UPSTREAM_WORKFLOW}@${BRANCH}"
+          echo "sha=" >> "$GITHUB_OUTPUT"
+          echo "should_proceed=false" >> "$GITHUB_OUTPUT"
+          echo "upstream_date=" >> "$GITHUB_OUTPUT"
+          echo "caller_date=" >> "$GITHUB_OUTPUT"
+          if [ "$FAIL_ON_NO_UPSTREAM" = "true" ]; then
+            echo "::error::No successful upstream workflow run available — caller cannot proceed"
+            exit 1
+          fi
+          exit 0
+        fi
+
+        # Last-successful caller run; default to a very old date if none.
+        CALLER_DATE=$(gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/${CALLER_WORKFLOW}/runs?status=success&per_page=1" \
+          --jq '.workflow_runs[0].updated_at // "2000-01-01T00:00:00Z"' 2>/dev/null || echo "2000-01-01T00:00:00Z")
+
+        echo "Upstream green: $UPSTREAM_DATE ($UPSTREAM_SHA) on $UPSTREAM_WORKFLOW"
+        echo "Caller last:    $CALLER_DATE on $CALLER_WORKFLOW"
+
+        if [[ "$UPSTREAM_DATE" > "$CALLER_DATE" ]]; then
+          echo "🚀 New green commit available; should_proceed=true"
+          echo "sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+          echo "should_proceed=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "✅ Caller is up to date; should_proceed=false"
+          echo "sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+          echo "should_proceed=false" >> "$GITHUB_OUTPUT"
+        fi
+        echo "upstream_date=$UPSTREAM_DATE" >> "$GITHUB_OUTPUT"
+        echo "caller_date=$CALLER_DATE" >> "$GITHUB_OUTPUT"

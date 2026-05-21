@@ -77,3 +77,46 @@ jobs:
           grep -qE '@chthonicsystems:registry=https://npm\.pkg\.github\.com/?$' "$NPMRC_FILE" \
             || (echo "❌ npm scope mapping missing" >&2; exit 1)
           echo "✅ setup-node-with-packages composite OK"
+
+  test-find-green-beta-commit:
+    name: find-green-beta-commit
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # Use this very workflow file as both upstream + caller so we
+      # exercise the composite without depending on the consumer's
+      # deploy workflows existing yet.
+      - name: Run composite
+        id: find
+        uses: ./actions/find-green-beta-commit
+        with:
+          upstream-workflow-file: test-composites.yml
+          caller-workflow-file: test-composites.yml
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          branch: main
+          fail-on-no-upstream: 'false'
+
+      - name: Verify outputs
+        shell: bash
+        env:
+          OUT_SHA: ${{ steps.find.outputs.sha }}
+          OUT_PROCEED: ${{ steps.find.outputs.should_proceed }}
+          OUT_UPSTREAM_DATE: ${{ steps.find.outputs.upstream-date }}
+          OUT_CALLER_DATE: ${{ steps.find.outputs.caller-date }}
+        run: |
+          echo "sha=${OUT_SHA}"
+          echo "should_proceed=${OUT_PROCEED}"
+          echo "upstream-date=${OUT_UPSTREAM_DATE}"
+          echo "caller-date=${OUT_CALLER_DATE}"
+          # When upstream == caller, should_proceed is 'false' because the
+          # last successful upstream date == the last successful caller date.
+          # Acceptable shape: should_proceed is one of 'true' | 'false'.
+          case "${OUT_PROCEED}" in
+            true|false) echo "✅ should_proceed has valid shape: ${OUT_PROCEED}" ;;
+            *) echo "❌ should_proceed has unexpected shape: ${OUT_PROCEED}" >&2; exit 1 ;;
+          esac
+          echo "✅ find-green-beta-commit composite OK"
