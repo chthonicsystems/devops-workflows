@@ -4,7 +4,9 @@
 # Four jobs:
 #
 #   1. build-and-push    — docker buildx build + push (api / web / backup)
-#   2. ssl-setup-beta    — bootstrap SSL via ./scripts/setup-ssl-github.sh
+#   2. ssl-setup-beta    — bootstrap SSL inline (sed-substitute DOMAIN_PLACEHOLDER
+#                          in nginx/conf.d/default.conf.template). Pre-PR-28 callers
+#                          can still pass ssl-script for back-compat.
 #   3. deploy-beta       — SSH deploy via ./scripts/deploy-github.sh
 #   4. playwright-e2e    — call e2e-gate.yml reusable workflow
 #
@@ -41,7 +43,12 @@
 #   XERO_*
 #
 # Optional caller vars:
-#   vars.CRM_DOMAIN  — passed to setup-ssl-github.sh for CRM cert provisioning
+#   vars.CRM_DOMAIN  — passed to ssl-setup-beta. When set AND a fork ships
+#                      its own nginx/conf.d/crm.conf.template, the inline
+#                      ssl setup will sed-substitute CRM_DOMAIN_PLACEHOLDER.
+#                      Sister-products forking from chthonicsystems/devops-template
+#                      do NOT need this — the template doesn't ship a CRM
+#                      vhost (Q4 of PR 28).
 
 name: Deploy beta (reusable)
 
@@ -72,10 +79,10 @@ on:
         required: false
         default: '/opt/torquetech'
       ssl-script:
-        description: 'Server-side SSL setup script (relative to working-directory)'
+        description: 'DEPRECATED — use ssl-script-inline:true (default since 2026-05-21) instead. Server-side SSL setup script (relative to working-directory). Kept for back-compat with pre-PR-28 callers.'
         type: string
         required: false
-        default: './scripts/setup-ssl-github.sh'
+        default: ''
       deploy-script:
         description: 'Server-side deploy script (relative to working-directory)'
         type: string
@@ -223,16 +230,55 @@ jobs:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
-          envs: DOMAIN,SSL_EMAIL,CRM_DOMAIN
+          envs: DOMAIN,SSL_EMAIL,CRM_DOMAIN,SSL_SCRIPT
           script: |
             set -e
             cd ${{ inputs.working-directory }}
             git pull origin ${{ inputs.git-branch }}
-            ${{ inputs.ssl-script }}
+
+            if [ -n "$SSL_SCRIPT" ] && [ -f "$SSL_SCRIPT" ]; then
+              # Legacy path: caller passed an explicit ssl-script. Run it.
+              # Pre-PR-28 TorqueTech used this with ./scripts/setup-ssl-github.sh.
+              "$SSL_SCRIPT"
+            else
+              # Default path (post-PR-28): inline sed-substitution. Replaces
+              # DOMAIN_PLACEHOLDER in nginx/conf.d/default.conf.template with the
+              # actual domain. The Cloudflare Origin Certificate at
+              # certs/origin.pem must already be on the server (provisioned
+              # out-of-band by the operator). This matches the behaviour of
+              # the now-deleted ./scripts/setup-ssl-github.sh.
+              echo "🔒 Inline SSL setup for $DOMAIN"
+
+              if [ ! -f "certs/origin.pem" ] || [ ! -f "certs/origin-key.pem" ]; then
+                echo "❌ Cloudflare Origin Certificate missing at certs/origin.pem + certs/origin-key.pem" >&2
+                exit 1
+              fi
+
+              mkdir -p nginx/conf.d
+              if [ -f "nginx/conf.d/default.conf.template" ]; then
+                sed "s/DOMAIN_PLACEHOLDER/$DOMAIN/g" \
+                  nginx/conf.d/default.conf.template > nginx/conf.d/default.conf
+                echo "✅ nginx/conf.d/default.conf substituted for $DOMAIN"
+              else
+                echo "❌ nginx/conf.d/default.conf.template not found" >&2
+                exit 1
+              fi
+
+              # Optional CRM vhost (legacy TorqueTech behaviour). Skipped post-PR-28
+              # because chthonicsystems/devops-template no longer ships
+              # nginx/conf.d/crm.conf.template — but kept here in case a fork
+              # adds its own crm.conf.template + sets vars.CRM_DOMAIN.
+              if [ -n "${CRM_DOMAIN:-}" ] && [ -f "nginx/conf.d/crm.conf.template" ]; then
+                sed "s/CRM_DOMAIN_PLACEHOLDER/$CRM_DOMAIN/g" \
+                  nginx/conf.d/crm.conf.template > nginx/conf.d/crm.conf
+                echo "✅ CRM nginx config substituted for $CRM_DOMAIN"
+              fi
+            fi
         env:
           DOMAIN: ${{ inputs.domain }}
           SSL_EMAIL: ${{ secrets.SSL_EMAIL }}
           CRM_DOMAIN: ${{ vars.CRM_DOMAIN }}
+          SSL_SCRIPT: ${{ inputs.ssl-script }}
 
   deploy-beta:
     needs: ssl-setup-beta

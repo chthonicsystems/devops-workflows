@@ -8,7 +8,9 @@
 #                            REACT_APP_API_URL=https://${prod-domain}
 #                            (the API + backup images are reused from
 #                            beta — no rebuild needed)
-#   3. ssl-setup-prod     — bootstrap SSL via inputs.ssl-script (server-side)
+#   3. ssl-setup-prod     — bootstrap SSL inline (sed-substitute
+#                            DOMAIN_PLACEHOLDER in nginx/conf.d/default.conf.template).
+#                            Pre-PR-28 callers can still pass ssl-script for back-compat.
 #   4. deploy-prod        — SSH deploy via inputs.deploy-script
 #
 # Required caller secrets — same set as deploy-beta.yml plus:
@@ -41,10 +43,10 @@ on:
         required: false
         default: '/opt/torquetech'
       ssl-script:
-        description: 'Server-side SSL setup script'
+        description: 'DEPRECATED — use inline default (since 2026-05-21) instead. Server-side SSL setup script (relative to working-directory). Kept for back-compat with pre-PR-28 callers.'
         type: string
         required: false
-        default: './scripts/setup-ssl-github.sh'
+        default: ''
       deploy-script:
         description: 'Server-side deploy script'
         type: string
@@ -180,17 +182,50 @@ jobs:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
-          envs: DOMAIN,SSL_EMAIL,GREEN_SHA
+          envs: DOMAIN,SSL_EMAIL,GREEN_SHA,SSL_SCRIPT
           script: |
             set -e
             cd ${{ inputs.working-directory }}
             git fetch origin ${{ inputs.branch }}
             git checkout $GREEN_SHA
-            ${{ inputs.ssl-script }}
+
+            if [ -n "$SSL_SCRIPT" ] && [ -f "$SSL_SCRIPT" ]; then
+              # Legacy path: caller passed an explicit ssl-script. Run it.
+              "$SSL_SCRIPT"
+            else
+              # Default path (post-PR-28): inline sed-substitution. Replaces
+              # DOMAIN_PLACEHOLDER in nginx/conf.d/default.conf.template with
+              # the actual domain. The Cloudflare Origin Certificate at
+              # certs/origin.pem must already be on the server.
+              echo "🔒 Inline SSL setup for $DOMAIN"
+
+              if [ ! -f "certs/origin.pem" ] || [ ! -f "certs/origin-key.pem" ]; then
+                echo "❌ Cloudflare Origin Certificate missing at certs/origin.pem + certs/origin-key.pem" >&2
+                exit 1
+              fi
+
+              mkdir -p nginx/conf.d
+              if [ -f "nginx/conf.d/default.conf.template" ]; then
+                sed "s/DOMAIN_PLACEHOLDER/$DOMAIN/g" \
+                  nginx/conf.d/default.conf.template > nginx/conf.d/default.conf
+                echo "✅ nginx/conf.d/default.conf substituted for $DOMAIN"
+              else
+                echo "❌ nginx/conf.d/default.conf.template not found" >&2
+                exit 1
+              fi
+
+              if [ -n "${CRM_DOMAIN:-}" ] && [ -f "nginx/conf.d/crm.conf.template" ]; then
+                sed "s/CRM_DOMAIN_PLACEHOLDER/$CRM_DOMAIN/g" \
+                  nginx/conf.d/crm.conf.template > nginx/conf.d/crm.conf
+                echo "✅ CRM nginx config substituted for $CRM_DOMAIN"
+              fi
+            fi
         env:
           DOMAIN: ${{ inputs.domain }}
           SSL_EMAIL: ${{ secrets.SSL_EMAIL }}
           GREEN_SHA: ${{ needs.find-green-commit.outputs.sha }}
+          CRM_DOMAIN: ${{ vars.CRM_DOMAIN }}
+          SSL_SCRIPT: ${{ inputs.ssl-script }}
 
   deploy-prod:
     needs: [find-green-commit, ssl-setup-prod]
