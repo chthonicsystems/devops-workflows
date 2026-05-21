@@ -1,0 +1,102 @@
+# Deploy CDK stacks (reusable workflow).
+#
+# Bootstraps + deploys AWS CDK stacks. Supports cross-region deployment
+# (e.g. main stacks in ap-southeast-1, AI stacks in us-east-1 where
+# Bedrock Claude + Guardrails live).
+#
+# Required caller secrets (forwarded via `secrets: inherit`):
+#   AWS_ACCESS_KEY_ID
+#   AWS_SECRET_ACCESS_KEY
+#
+# Lifted from torquetech .github/workflows/deploy-cdk.yml.
+
+name: Deploy CDK (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      cdk-region:
+        description: 'Primary AWS region for CDK deploy (e.g. ap-southeast-1)'
+        type: string
+        required: true
+      bootstrap-additional-region:
+        description: 'Optional second region to bootstrap (e.g. us-east-1 for Bedrock); empty to skip'
+        type: string
+        required: false
+        default: 'us-east-1'
+      cdk-path:
+        description: 'CDK project path (relative to repo root)'
+        type: string
+        required: false
+        default: 'cdk'
+      node-version:
+        description: 'Node.js version'
+        type: string
+        required: false
+        default: '20'
+      install-command:
+        description: 'How to install deps in CDK dir'
+        type: string
+        required: false
+        default: 'npm install'
+      deploy-args:
+        description: 'Extra args for npx cdk deploy (e.g. --all --require-approval never)'
+        type: string
+        required: false
+        default: '--all --require-approval never'
+      runs-on:
+        description: 'Runner image'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+      runner-environment:
+        description: 'GitHub Environment name to run under (for env-scoped secrets)'
+        type: string
+        required: false
+        default: ''
+
+jobs:
+  deploy:
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.runner-environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.cdk-path }}
+        run: ${{ inputs.install-command }}
+
+      # CDK cross-region deploy requires each target region to be
+      # bootstrapped. The primary region is bootstrapped unconditionally;
+      # bootstrap-additional-region (default us-east-1) is bootstrapped
+      # too unless explicitly cleared. Both are idempotent + harmless if
+      # already bootstrapped (`|| true` to tolerate already-bootstrapped state).
+      - name: Bootstrap CDK (primary region)
+        working-directory: ${{ inputs.cdk-path }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ inputs.cdk-region }}
+        run: npx cdk bootstrap || true
+
+      - name: Bootstrap CDK (additional region)
+        if: inputs.bootstrap-additional-region != ''
+        working-directory: ${{ inputs.cdk-path }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ inputs.bootstrap-additional-region }}
+        run: npx cdk bootstrap || true
+
+      - name: Deploy CDK
+        working-directory: ${{ inputs.cdk-path }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ inputs.cdk-region }}
+          NODE_ENV: production
+        run: npx cdk deploy ${{ inputs.deploy-args }}
