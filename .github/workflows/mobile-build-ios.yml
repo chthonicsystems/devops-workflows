@@ -274,7 +274,7 @@ jobs:
             ios/App/CapApp-SPM/Package.swift
 
       - name: Sync app version to native
-        run: cd ${{ inputs.working-directory }} && npx mobile-runtime sync-version --platform ios
+        run: cd ${{ inputs.working-directory }} && npx --package=@chthonicsystems/devops-scripts version-sync sync-version --platform ios
 
       - name: Build IPA via Fastlane (TestFlight lane)
         env:

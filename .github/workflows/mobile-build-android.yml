@@ -191,7 +191,7 @@ jobs:
         if: steps.check.outputs.skip == 'false'
         run: |
           cd ${{ inputs.working-directory }}
-          npx mobile-runtime sync-version --platform android
+          npx --package=@chthonicsystems/devops-scripts version-sync sync-version --platform android
 
       - name: Build + upload AAB via Fastlane
         if: steps.check.outputs.skip == 'false'
