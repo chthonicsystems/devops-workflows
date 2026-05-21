@@ -1,0 +1,38 @@
+name: Test composites
+
+# Smoke tests for composite actions defined in this repo. Runs on
+# push to main + PR + manual dispatch. Each job exercises one
+# composite action with realistic inputs so we catch breakage
+# before downstream consumers do.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'actions/**'
+      - '.github/workflows/test-composites.yml'
+  pull_request:
+    paths:
+      - 'actions/**'
+      - '.github/workflows/test-composites.yml'
+  workflow_dispatch:
+
+jobs:
+  test-setup-dotnet-with-packages:
+    name: setup-dotnet-with-packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run composite (with GITHUB_TOKEN fallback)
+        uses: ./actions/setup-dotnet-with-packages
+        with:
+          github-packages-pat: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify dotnet version + source
+        shell: bash
+        run: |
+          dotnet --version
+          dotnet nuget list source
+          dotnet nuget list source | grep -q 'github-chthonic' || (echo "❌ chthonic NuGet source missing" >&2; exit 1)
+          echo "✅ setup-dotnet-with-packages composite OK"

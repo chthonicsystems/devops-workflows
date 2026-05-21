@@ -1,0 +1,69 @@
+# Setup .NET with Chthonic GitHub Packages auth.
+#
+# Wraps actions/setup-dotnet@v4 and registers the chthonicsystems
+# NuGet feed for cross-repo @chthonic/* package resolution. The
+# GitHub Packages PAT precedence is:
+#
+#   secrets.CHTHONIC_PACKAGES_PAT  (preferred — cross-repo PAT with read:packages)
+#     OR
+#   secrets.GITHUB_TOKEN           (fallback — works for same-repo packages only)
+#
+# Caller must pass a `github-packages-pat` input wired to whichever
+# secret is preferred (the action does NOT read secrets directly so
+# it stays usable without `secrets: inherit` in test workflows).
+#
+# Lifted from torquetech .github/workflows/deploy-beta.yml + PR 25
+# fix-forward 13574354 (cross-repo CHTHONIC_PACKAGES_PAT precedent).
+
+name: Setup .NET with GitHub Packages
+description: 'actions/setup-dotnet@v4 + Chthonic GitHub Packages NuGet feed registration'
+
+inputs:
+  dotnet-version:
+    description: 'dotnet SDK version'
+    required: false
+    default: '9.0.x'
+  github-username:
+    description: 'GitHub username for Packages auth (typically ${{ github.actor }})'
+    required: false
+    default: ${{ github.actor }}
+  github-packages-pat:
+    description: 'PAT with read:packages scope (CHTHONIC_PACKAGES_PAT preferred; GITHUB_TOKEN fallback)'
+    required: true
+  source-name:
+    description: 'NuGet source name to register'
+    required: false
+    default: 'github-chthonic'
+  source-url:
+    description: 'NuGet source URL'
+    required: false
+    default: 'https://nuget.pkg.github.com/chthonicsystems/index.json'
+
+runs:
+  using: composite
+  steps:
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ inputs.dotnet-version }}
+
+    - name: Register Chthonic GitHub Packages NuGet source
+      shell: bash
+      env:
+        GITHUB_USERNAME: ${{ inputs.github-username }}
+        GITHUB_PACKAGES_PAT: ${{ inputs.github-packages-pat }}
+        SOURCE_NAME: ${{ inputs.source-name }}
+        SOURCE_URL: ${{ inputs.source-url }}
+      run: |
+        # Idempotent: if source already exists at this URL, skip registration.
+        if dotnet nuget list source 2>/dev/null | grep -q "${SOURCE_URL}"; then
+          echo "✅ Source already registered: ${SOURCE_URL}"
+        else
+          dotnet nuget add source "${SOURCE_URL}" \
+            --name "${SOURCE_NAME}" \
+            --username "${GITHUB_USERNAME}" \
+            --password "${GITHUB_PACKAGES_PAT}" \
+            --store-password-in-clear-text
+          echo "✅ Registered source: ${SOURCE_NAME} → ${SOURCE_URL}"
+        fi
+        dotnet nuget list source
