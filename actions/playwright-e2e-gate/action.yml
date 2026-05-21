@@ -1,0 +1,186 @@
+# Run Playwright E2E tests as a hard-gate against a deployed
+# environment.
+#
+# Lifts the playwright-e2e-beta job from TT's deploy-beta.yml:
+#   1. Setup Node.js + install deps + install Playwright browsers
+#   2. Poll the target API for readiness (auth probe to /api/auth/login)
+#   3. Run npx playwright test against the deployed env
+#   4. Upload the playwright-report/ artifact regardless of pass/fail
+#   5. Write a Markdown summary block to $GITHUB_STEP_SUMMARY
+#
+# Failure is hard — the composite exits non-zero on readiness timeout
+# or any spec failure, gating the calling workflow.
+#
+# Inputs:
+#   base-url                  (required) target environment URL
+#   admin-username            (required) seed admin for the readiness probe
+#   admin-password            (required) seed admin password
+#   readiness-endpoint        (default '/api/auth/login') endpoint POST'd for readiness
+#   readiness-timeout-seconds (default 180)
+#   readiness-poll-seconds    (default 5)
+#   skip-readiness            (default 'false')
+#   node-version              (default '22')
+#   working-directory         (default '.')
+#   install-command           (default 'npm install') how to install deps
+#   browsers                  (default 'chromium')
+#   spec-glob                 (default '') passed to playwright test as final arg
+#   report-name               (default 'playwright-report') artifact name
+#   report-path               (default 'playwright-report/') artifact path
+#   report-retention-days     (default 14)
+#   summary-title             (default '🎭 E2E Test Results') $GITHUB_STEP_SUMMARY block title
+#
+# Lifted from torquetech .github/workflows/deploy-beta.yml playwright-e2e-beta job.
+
+name: Playwright E2E gate
+description: 'Wait for environment readiness + run Playwright suite + upload report + summary'
+
+inputs:
+  base-url:
+    description: 'Target environment URL (e.g. https://torquetech-beta.chthonicsystems.com)'
+    required: true
+  admin-username:
+    description: 'Seed admin username for readiness probe + spec auth'
+    required: true
+  admin-password:
+    description: 'Seed admin password'
+    required: true
+  readiness-endpoint:
+    description: 'Endpoint POST-probed for readiness'
+    required: false
+    default: '/api/auth/login'
+  readiness-timeout-seconds:
+    description: 'Total readiness wait budget (seconds)'
+    required: false
+    default: '180'
+  readiness-poll-seconds:
+    description: 'Wait between readiness probes (seconds)'
+    required: false
+    default: '5'
+  skip-readiness:
+    description: "Skip the readiness probe ('true' | 'false')"
+    required: false
+    default: 'false'
+  node-version:
+    description: 'Node.js version'
+    required: false
+    default: '22'
+  working-directory:
+    description: 'Repo subdirectory containing package.json + playwright.config'
+    required: false
+    default: '.'
+  install-command:
+    description: "How to install deps ('npm install' | 'npm ci' | 'npm install --no-audit')"
+    required: false
+    default: 'npm install'
+  browsers:
+    description: 'Browsers to install (space-separated)'
+    required: false
+    default: 'chromium'
+  spec-glob:
+    description: 'Optional glob passed to npx playwright test'
+    required: false
+    default: ''
+  report-name:
+    description: 'Uploaded artifact name'
+    required: false
+    default: 'playwright-report'
+  report-path:
+    description: 'Path to playwright-report/ output'
+    required: false
+    default: 'playwright-report/'
+  report-retention-days:
+    description: 'Artifact retention'
+    required: false
+    default: '14'
+  summary-title:
+    description: 'Title for the $GITHUB_STEP_SUMMARY block'
+    required: false
+    default: '🎭 E2E Test Results'
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Install dependencies
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: ${{ inputs.install-command }}
+
+    - name: Install Playwright browsers
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: npx playwright install --with-deps ${{ inputs.browsers }}
+
+    - name: Wait for environment readiness
+      if: inputs.skip-readiness != 'true'
+      shell: bash
+      env:
+        BASE_URL: ${{ inputs.base-url }}
+        READINESS_ENDPOINT: ${{ inputs.readiness-endpoint }}
+        ADMIN_USERNAME: ${{ inputs.admin-username }}
+        ADMIN_PASSWORD: ${{ inputs.admin-password }}
+        TIMEOUT_SECONDS: ${{ inputs.readiness-timeout-seconds }}
+        POLL_SECONDS: ${{ inputs.readiness-poll-seconds }}
+      run: |
+        # Beta containers can take 30-60s post-deploy to finish migrations
+        # and start accepting auth requests. Poll until the auth probe
+        # succeeds or we hit the timeout — this replaces the implicit
+        # warm-up loop the fixture used to do via worker restarts.
+        DEADLINE=$(( $(date +%s) + TIMEOUT_SECONDS ))
+        while [ $(date +%s) -lt $DEADLINE ]; do
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${BASE_URL}${READINESS_ENDPOINT}" \
+            -H 'Content-Type: application/json' \
+            -d "{\"username\":\"${ADMIN_USERNAME}\",\"password\":\"${ADMIN_PASSWORD}\"}" || true)
+          echo "readiness probe: HTTP $STATUS"
+          if [ "$STATUS" = "200" ]; then
+            echo "✅ environment ready"
+            exit 0
+          fi
+          sleep "$POLL_SECONDS"
+        done
+        echo "::error::environment did not become ready within ${TIMEOUT_SECONDS}s" >&2
+        exit 1
+
+    - name: Run Playwright E2E tests
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        BASE_URL: ${{ inputs.base-url }}
+        E2E_ADMIN_USERNAME: ${{ inputs.admin-username }}
+        E2E_ADMIN_PASSWORD: ${{ inputs.admin-password }}
+        SPEC_GLOB: ${{ inputs.spec-glob }}
+      run: |
+        if [ -n "$SPEC_GLOB" ]; then
+          npx playwright test "$SPEC_GLOB"
+        else
+          npx playwright test
+        fi
+
+    - name: Upload Playwright report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.report-name }}
+        path: ${{ inputs.working-directory }}/${{ inputs.report-path }}
+        retention-days: ${{ inputs.report-retention-days }}
+
+    - name: Test results summary
+      if: always()
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SUMMARY_TITLE: ${{ inputs.summary-title }}
+      run: |
+        echo "## ${SUMMARY_TITLE}" >> "$GITHUB_STEP_SUMMARY"
+        if [ -f test-results/.last-run.json ]; then
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat test-results/.last-run.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo '_No test-results/.last-run.json produced._' >> "$GITHUB_STEP_SUMMARY"
+        fi
