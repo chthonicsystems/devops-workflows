@@ -161,9 +161,9 @@ jobs:
           # boundary and append an ellipsis when over budget so submission
           # never fails for length.
           RELEASE_NOTES=$(node -e "const d = require('./${APP_VERSION_JSON}'); const v = d[d.latest]; const notes = [...(v.releaseNotes || []), ...(v.ios?.releaseNotes || [])]; let text = notes.join('\n') || 'Bug fixes and performance improvements'; const MAX = 4000; if (text.length > MAX) { text = text.slice(0, MAX - 1).replace(/\s+\S*$/, '') + '…'; } console.log(text);")
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "versionCode=$VERSION_CODE" >> "$GITHUB_OUTPUT"
           {
+            echo "version=$VERSION"
+            echo "versionCode=$VERSION_CODE"
             echo "releaseNotes<<EOF"
             echo "$RELEASE_NOTES"
             echo "EOF"
@@ -293,11 +293,11 @@ jobs:
 
       - name: Mirror IPA to S3 (versioned + LATEST)
         run: |
-          aws s3 cp ${{ inputs.ios-build-export-path }} \
-            s3://${{ env.AWS_IOS_BUCKET }}/v${{ needs.check-s3.outputs.version }}/App.ipa \
+          aws s3 cp "${{ inputs.ios-build-export-path }}" \
+            "s3://${{ env.AWS_IOS_BUCKET }}/v${{ needs.check-s3.outputs.version }}/App.ipa" \
             --content-type application/octet-stream
-          aws s3 cp ${{ inputs.ios-build-export-path }} \
-            s3://${{ env.AWS_IOS_BUCKET }}/LATEST/App.ipa \
+          aws s3 cp "${{ inputs.ios-build-export-path }}" \
+            "s3://${{ env.AWS_IOS_BUCKET }}/LATEST/App.ipa" \
             --content-type application/octet-stream
 
       - name: Cleanup keychain
