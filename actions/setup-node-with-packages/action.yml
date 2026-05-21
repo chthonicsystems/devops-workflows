@@ -63,14 +63,23 @@ runs:
         REGISTRY_SCOPE: ${{ inputs.registry-scope }}
         REGISTRY_URL: ${{ inputs.registry-url }}
       run: |
-        # actions/setup-node writes ~/.npmrc with the scope→registry mapping
-        # plus an _authToken line consuming $NODE_AUTH_TOKEN at install time.
-        # Verify the mapping landed.
-        if grep -q "${REGISTRY_SCOPE}:registry=${REGISTRY_URL}" ~/.npmrc 2>/dev/null; then
-          echo "✅ npm scope mapping registered: ${REGISTRY_SCOPE} → ${REGISTRY_URL}"
+        # actions/setup-node@v4 writes .npmrc to a job-temp dir and points npm
+        # at it via $NPM_CONFIG_USERCONFIG (NOT ~/.npmrc). The mapping line
+        # has the form: //npm.pkg.github.com/:_authToken=$NODE_AUTH_TOKEN
+        # plus @scope:registry=URL/. Verify the mapping landed.
+        NPMRC_FILE="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+        if [ ! -f "$NPMRC_FILE" ]; then
+          echo "❌ Expected .npmrc at $NPMRC_FILE not found" >&2
+          exit 1
+        fi
+        # Note: setup-node strips any trailing slash from registry-url,
+        # then writes the registry line with a trailing slash. Match either.
+        STRIPPED_URL="${REGISTRY_URL%/}"
+        if grep -qE "${REGISTRY_SCOPE}:registry=${STRIPPED_URL}/?$" "$NPMRC_FILE"; then
+          echo "✅ npm scope mapping registered: ${REGISTRY_SCOPE} → ${REGISTRY_URL} (in $NPMRC_FILE)"
         else
-          echo "❌ npm scope mapping missing in ~/.npmrc" >&2
-          cat ~/.npmrc 2>/dev/null || true
+          echo "❌ npm scope mapping missing in $NPMRC_FILE" >&2
+          cat "$NPMRC_FILE"
           exit 1
         fi
 

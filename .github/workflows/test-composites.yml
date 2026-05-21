@@ -71,7 +71,9 @@ jobs:
         run: |
           node --version
           npm --version
-          cat ~/.npmrc
-          grep -q '@chthonicsystems:registry=https://npm.pkg.github.com' ~/.npmrc \
+          NPMRC_FILE="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+          echo "Reading $NPMRC_FILE"
+          cat "$NPMRC_FILE"
+          grep -qE '@chthonicsystems:registry=https://npm\.pkg\.github\.com/?$' "$NPMRC_FILE" \
             || (echo "❌ npm scope mapping missing" >&2; exit 1)
           echo "✅ setup-node-with-packages composite OK"
