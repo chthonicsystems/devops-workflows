@@ -252,7 +252,7 @@ jobs:
           API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
         run: |
           mkdir -p ~/.private_keys
-          echo "$API_KEY_BASE64" | base64 --decode > ~/.private_keys/AuthKey_${API_KEY_ID}.p8
+          echo "$API_KEY_BASE64" | base64 --decode > "$HOME/.private_keys/AuthKey_${API_KEY_ID}.p8"
           echo "APP_STORE_CONNECT_API_KEY_PATH=$HOME/.private_keys/AuthKey_${API_KEY_ID}.p8" >> "$GITHUB_ENV"
 
       - name: Install web deps + cap sync ios
@@ -343,7 +343,7 @@ jobs:
           API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
         run: |
           mkdir -p ~/.private_keys
-          echo "$API_KEY_BASE64" | base64 --decode > ~/.private_keys/AuthKey_${API_KEY_ID}.p8
+          echo "$API_KEY_BASE64" | base64 --decode > "$HOME/.private_keys/AuthKey_${API_KEY_ID}.p8"
           echo "APP_STORE_CONNECT_API_KEY_PATH=$HOME/.private_keys/AuthKey_${API_KEY_ID}.p8" >> "$GITHUB_ENV"
 
       - name: Submit for review via Fastlane (release lane)
