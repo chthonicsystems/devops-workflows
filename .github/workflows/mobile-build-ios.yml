@@ -1,0 +1,386 @@
+# Build iOS IPA via Capacitor + Fastlane → TestFlight + App Store
+# review (reusable workflow).
+#
+# Lifted from torquetech .github/workflows/deploy-ios.yml (post-PR-25
+# Fastlane shape; previously 200-line embedded Python ASC API → now
+# Spaceship blocking-state precheck + deliver).
+#
+# Five jobs:
+#   1. find-green-commit  — uses find-green-beta-commit composite
+#   2. check-s3           — fetch app version + check if IPA already in S3
+#   3. web-build          — ionic build (linux runner, fast)
+#   4. build-ios          — macOS-26 runner: Ruby + cap sync + SPM workaround
+#                            + bundle exec fastlane ios beta → TestFlight + S3 mirror
+#   5. publish-app-store  — macOS-26 runner: bundle exec fastlane ios release
+#                            (Spaceship precheck + deliver to App Store review)
+#   6. cleanup-on-failure — delete partial S3 IPA on failure
+#
+# Required caller secrets (forwarded via `secrets: inherit`):
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION
+#   AWS_S3_BUCKET_IOS                — IPA mirror bucket
+#   APP_STORE_CONNECT_API_KEY_ID     — ASC API key ID (10-char)
+#   APP_STORE_CONNECT_API_ISSUER_ID  — ASC API issuer ID (UUID)
+#   APP_STORE_CONNECT_API_KEY_BASE64 — base64 of the .p8 private key
+#   MATCH_PASSWORD                   — Fastlane match cert decryption pass
+#   MATCH_GIT_BASIC_AUTHORIZATION    — base64 token for private match cert repo
+#   REACT_APP_GOOGLE_IOS_CLIENT_ID, REACT_APP_MICROSOFT_CLIENT_ID
+#   REACT_APP_APPLE_CLIENT_ID
+#   CHTHONIC_PACKAGES_PAT            — optional; falls back to GITHUB_TOKEN
+
+name: Mobile build (iOS, reusable)
+
+on:
+  workflow_call:
+    inputs:
+      upstream-workflow-file:
+        description: 'Upstream workflow used for find-green check'
+        type: string
+        required: false
+        default: 'deploy-beta.yml'
+      caller-workflow-file:
+        description: "Caller's workflow file (typically deploy-ios.yml)"
+        type: string
+        required: false
+        default: 'deploy-ios.yml'
+      working-directory:
+        description: 'Repo subdir containing package.json + capacitor.config + ios/'
+        type: string
+        required: false
+        default: 'web'
+      app-version-json-path:
+        description: 'Path to web/app_version.json relative to repo root'
+        type: string
+        required: false
+        default: 'web/app_version.json'
+      branch:
+        description: 'Branch to look up upstream successful runs on'
+        type: string
+        required: false
+        default: 'main'
+      runs-on-linux:
+        description: 'Linux runner image for find-green + check-s3 + web-build + cleanup'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+      runs-on-macos:
+        description: 'macOS runner image for the iOS build + App Store submit'
+        type: string
+        required: false
+        default: 'macos-26'
+      runner-environment:
+        description: 'GitHub Environment name to scope macOS jobs (typically production)'
+        type: string
+        required: false
+        default: 'production'
+      ruby-version:
+        description: 'Ruby version for Fastlane'
+        type: string
+        required: false
+        default: '3.2'
+      node-version:
+        description: 'Node.js version'
+        type: string
+        required: false
+        default: '22'
+      beta-lane:
+        description: "Fastlane lane for TestFlight build (e.g. 'ios beta')"
+        type: string
+        required: false
+        default: 'ios beta'
+      release-lane:
+        description: "Fastlane lane for App Store submit (e.g. 'ios release')"
+        type: string
+        required: false
+        default: 'ios release'
+      ios-build-export-path:
+        description: 'Where Fastlane gym writes the IPA, relative to repo root'
+        type: string
+        required: false
+        default: 'web/ios/App/build/export/App.ipa'
+      asc-metadata-path:
+        description: 'Path to App Store Connect per-locale metadata, relative to repo root'
+        type: string
+        required: false
+        default: 'web/ios/metadata'
+
+permissions:
+  actions: read
+  contents: read
+  packages: read
+
+env:
+  AWS_IOS_BUCKET: ${{ secrets.AWS_S3_BUCKET_IOS }}
+  GITHUB_USERNAME: ${{ github.actor }}
+  GITHUB_PACKAGES_PAT: ${{ secrets.CHTHONIC_PACKAGES_PAT || secrets.GITHUB_TOKEN }}
+
+jobs:
+  find-green-commit:
+    runs-on: ${{ inputs.runs-on-linux }}
+    outputs:
+      sha: ${{ steps.find.outputs.sha }}
+      should_build: ${{ steps.find.outputs.should_proceed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find last-green upstream commit
+        id: find
+        uses: chthonicsystems/devops-workflows/actions/find-green-beta-commit@main
+        with:
+          upstream-workflow-file: ${{ inputs.upstream-workflow-file }}
+          caller-workflow-file: ${{ inputs.caller-workflow-file }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ inputs.branch }}
+          fail-on-no-upstream: 'false'
+
+  check-s3:
+    needs: find-green-commit
+    if: needs.find-green-commit.outputs.should_build == 'true'
+    runs-on: ${{ inputs.runs-on-linux }}
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      version: ${{ steps.version.outputs.version }}
+      versionCode: ${{ steps.version.outputs.versionCode }}
+      releaseNotes: ${{ steps.version.outputs.releaseNotes }}
+    steps:
+      - name: Checkout green commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.find-green-commit.outputs.sha }}
+          sparse-checkout: ${{ inputs.app-version-json-path }}
+          sparse-checkout-cone-mode: false
+
+      - name: Read version
+        id: version
+        env:
+          APP_VERSION_JSON: ${{ inputs.app-version-json-path }}
+        run: |
+          VERSION=$(node -e "const d = require('./${APP_VERSION_JSON}'); const v = d[d.latest]; console.log(v.ios?.version || d.latest);")
+          VERSION_CODE=$(node -e "const d = require('./${APP_VERSION_JSON}'); const v = d[d.latest]; console.log(v.ios?.versionCode || v.versionCode);")
+          # App Store Connect caps the "What's New" / WhatsNew localised text at
+          # 4000 characters per locale. Truncate cleanly at the last word
+          # boundary and append an ellipsis when over budget so submission
+          # never fails for length.
+          RELEASE_NOTES=$(node -e "const d = require('./${APP_VERSION_JSON}'); const v = d[d.latest]; const notes = [...(v.releaseNotes || []), ...(v.ios?.releaseNotes || [])]; let text = notes.join('\n') || 'Bug fixes and performance improvements'; const MAX = 4000; if (text.length > MAX) { text = text.slice(0, MAX - 1).replace(/\s+\S*$/, '') + '…'; } console.log(text);")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "versionCode=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          {
+            echo "releaseNotes<<EOF"
+            echo "$RELEASE_NOTES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Check if IPA already exists in S3
+        id: check
+        run: |
+          if aws s3 ls "s3://${{ env.AWS_IOS_BUCKET }}/v${{ steps.version.outputs.version }}/App.ipa" 2>/dev/null; then
+            echo "✅ v${{ steps.version.outputs.version }} already in S3, skipping build"
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "🔨 v${{ steps.version.outputs.version }} not found, will build"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  web-build:
+    needs: [find-green-commit, check-s3]
+    if: needs.check-s3.outputs.should_build == 'true'
+    runs-on: ${{ inputs.runs-on-linux }}
+    steps:
+      - name: Checkout green commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.find-green-commit.outputs.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Install dependencies
+        run: cd ${{ inputs.working-directory }} && npm ci
+
+      - name: Build web
+        env:
+          REACT_APP_GOOGLE_IOS_CLIENT_ID: ${{ secrets.REACT_APP_GOOGLE_IOS_CLIENT_ID }}
+          REACT_APP_MICROSOFT_CLIENT_ID: ${{ secrets.REACT_APP_MICROSOFT_CLIENT_ID }}
+          REACT_APP_APPLE_CLIENT_ID: ${{ secrets.REACT_APP_APPLE_CLIENT_ID }}
+          REACT_APP_VERSION: ${{ needs.check-s3.outputs.version }}
+          NODE_ENV: production
+        run: cd ${{ inputs.working-directory }} && ./node_modules/.bin/ionic build
+
+      - name: Upload web build artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-build
+          path: ${{ inputs.working-directory }}/build
+          retention-days: 1
+
+  build-ios:
+    needs: [find-green-commit, check-s3, web-build]
+    runs-on: ${{ inputs.runs-on-macos }}
+    environment: ${{ inputs.runner-environment }}
+    steps:
+      - name: Checkout green commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.find-green-commit.outputs.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ inputs.ruby-version }}
+          bundler-cache: true
+
+      - name: Download web build artefact
+        uses: actions/download-artifact@v4
+        with:
+          name: web-build
+          path: ${{ inputs.working-directory }}/build
+
+      - name: Decode App Store Connect API key
+        env:
+          API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+          API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+        run: |
+          mkdir -p ~/.private_keys
+          echo "$API_KEY_BASE64" | base64 --decode > ~/.private_keys/AuthKey_${API_KEY_ID}.p8
+          echo "APP_STORE_CONNECT_API_KEY_PATH=$HOME/.private_keys/AuthKey_${API_KEY_ID}.p8" >> "$GITHUB_ENV"
+
+      - name: Install web deps + cap sync ios
+        run: |
+          cd ${{ inputs.working-directory }}
+          npm ci
+          ./node_modules/.bin/cap sync ios
+
+      - name: Apply SPM workaround for @capacitor-firebase/app-check
+        # Resolves Swift Package Manager identity collision: the directory
+        # name @capacitor-firebase/app-check collides with google/app-check
+        # transitive dep from GoogleSignIn-iOS. Symlink + sed-rewrite the
+        # reference in CapApp-SPM/Package.swift to a non-colliding name.
+        run: |
+          cd ${{ inputs.working-directory }}
+          ln -sf "$(pwd)/node_modules/@capacitor-firebase/app-check" \
+                 "$(pwd)/node_modules/@capacitor-firebase/capacitor-firebase-app-check"
+          sed -i '' 's|@capacitor-firebase/app-check"|@capacitor-firebase/capacitor-firebase-app-check"|' \
+            ios/App/CapApp-SPM/Package.swift
+
+      - name: Sync app version to native
+        run: cd ${{ inputs.working-directory }} && npx mobile-runtime sync-version --platform ios
+
+      - name: Build IPA via Fastlane (TestFlight lane)
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
+        run: bundle exec fastlane ${{ inputs.beta-lane }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Mirror IPA to S3 (versioned + LATEST)
+        run: |
+          aws s3 cp ${{ inputs.ios-build-export-path }} \
+            s3://${{ env.AWS_IOS_BUCKET }}/v${{ needs.check-s3.outputs.version }}/App.ipa \
+            --content-type application/octet-stream
+          aws s3 cp ${{ inputs.ios-build-export-path }} \
+            s3://${{ env.AWS_IOS_BUCKET }}/LATEST/App.ipa \
+            --content-type application/octet-stream
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          # Defensive cleanup; setup_ci's keychain is ephemeral but we
+          # don't want any persistent state on the runner just in case.
+          security delete-keychain "$RUNNER_TEMP/fastlane_tmp_keychain"-* 2>/dev/null || true
+
+      - name: Summary
+        run: |
+          {
+            echo "## 🍎 iOS Build — Built + Uploaded to TestFlight"
+            echo "**Version:** ${{ needs.check-s3.outputs.version }} (build: ${{ needs.check-s3.outputs.versionCode }})"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish-app-store:
+    needs: [find-green-commit, check-s3, build-ios]
+    runs-on: ${{ inputs.runs-on-macos }}
+    environment: ${{ inputs.runner-environment }}
+    steps:
+      - name: Checkout green commit (sparse)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.find-green-commit.outputs.sha }}
+          # Need fastlane/ + Gemfile* + iOS metadata for `deliver`
+          sparse-checkout: |
+            fastlane
+            Gemfile
+            Gemfile.lock
+            ${{ inputs.asc-metadata-path }}
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ inputs.ruby-version }}
+          bundler-cache: true
+
+      - name: Decode App Store Connect API key
+        env:
+          API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+          API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+        run: |
+          mkdir -p ~/.private_keys
+          echo "$API_KEY_BASE64" | base64 --decode > ~/.private_keys/AuthKey_${API_KEY_ID}.p8
+          echo "APP_STORE_CONNECT_API_KEY_PATH=$HOME/.private_keys/AuthKey_${API_KEY_ID}.p8" >> "$GITHUB_ENV"
+
+      - name: Submit for review via Fastlane (release lane)
+        # The lane runs a Spaceship-based blocking-state precheck before
+        # invoking deliver. If an existing AppStoreVersion is in
+        # IN_REVIEW / PROCESSING_FOR_APP_STORE / PENDING_DEVELOPER_RELEASE /
+        # PENDING_APPLE_RELEASE / READY_FOR_SALE / PROCESSING_FOR_DISTRIBUTION,
+        # the lane logs a warning and returns 0 — preserves TT's pre-PR-24
+        # graceful soft-skip behaviour. Otherwise deliver syncs per-locale
+        # metadata from web/ios/metadata/<locale>/*.txt and posts to
+        # reviewSubmissions.
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: bundle exec fastlane ${{ inputs.release-lane }}
+
+      - name: Summary
+        run: |
+          {
+            echo "## 🏪 App Store — Submitted for Review (or gracefully skipped)"
+            echo "**Version:** v${{ needs.check-s3.outputs.version }} (build: ${{ needs.check-s3.outputs.versionCode }})"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  cleanup-on-failure:
+    needs: [check-s3, publish-app-store]
+    if: failure() && needs.check-s3.outputs.should_build == 'true'
+    runs-on: ${{ inputs.runs-on-linux }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Delete IPA from S3
+        run: |
+          echo "🧹 Cleaning up failed build artifact"
+          aws s3 rm "s3://${{ env.AWS_IOS_BUCKET }}/v${{ needs.check-s3.outputs.version }}/App.ipa" || true
+          aws s3 rm "s3://${{ env.AWS_IOS_BUCKET }}/LATEST/App.ipa" || true
