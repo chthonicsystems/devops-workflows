@@ -1,0 +1,123 @@
+# Deploy monitoring stack (Prometheus + Grafana + Fluent Bit) to a
+# dedicated server.
+#
+# Lifted from torquetech .github/workflows/deploy-monitoring.yml.
+#
+# Two-step: bootstrap SSL certs (Let's Encrypt standalone) if not
+# present, then deploy the docker-compose stack with .env.monitoring
+# materialised from caller secrets.
+#
+# Required caller secrets (forwarded via `secrets: inherit`):
+#   DO_HOST, DO_USER, DO_SSH_KEY
+#   DOMAIN              — monitoring server FQDN (e.g. monitoring.chthonicsystems.com)
+#   SSL_EMAIL           — Let's Encrypt registration email
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION  — Fluent Bit → CloudWatch
+#   GRAFANA_ADMIN_PASSWORD
+
+name: Deploy monitoring (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      compose-file:
+        description: 'docker-compose file relative to working-directory'
+        type: string
+        required: false
+        default: 'docker-compose.monitoring.yml'
+      working-directory:
+        description: 'Server-side directory containing the compose file'
+        type: string
+        required: false
+        default: '/opt/torquetech'
+      git-branch:
+        description: 'Branch to git pull on the server before deploy'
+        type: string
+        required: false
+        default: 'main'
+      runs-on:
+        description: 'Runner image'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+      runner-environment:
+        description: 'GitHub Environment name to run under (for env-scoped secrets)'
+        type: string
+        required: false
+        default: ''
+
+jobs:
+  deploy-monitoring:
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.runner-environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Bootstrap SSL on first run; idempotent (skips when fullchain.pem
+      # already exists). Standalone certbot binds :80 briefly so the
+      # nginx container must NOT be running yet on first run.
+      - name: Setup SSL on monitoring server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          envs: DOMAIN,SSL_EMAIL
+          script: |
+            set -e
+            cd ${{ inputs.working-directory }}
+            git pull origin ${{ inputs.git-branch }}
+
+            if [ ! -f "certbot/conf/live/$DOMAIN/fullchain.pem" ]; then
+              mkdir -p certbot/conf certbot/www
+              docker run --rm \
+                -v $(pwd)/certbot/conf:/etc/letsencrypt \
+                -v $(pwd)/certbot/www:/var/www/certbot \
+                -p 80:80 \
+                certbot/certbot certonly \
+                --standalone \
+                --email "${SSL_EMAIL:-admin@$DOMAIN}" \
+                --agree-tos --no-eff-email \
+                -d "$DOMAIN"
+            fi
+        env:
+          DOMAIN: ${{ secrets.DOMAIN }}
+          SSL_EMAIL: ${{ secrets.SSL_EMAIL }}
+
+      - name: Deploy monitoring stack
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          envs: AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_REGION,GRAFANA_ADMIN_PASSWORD,DOMAIN
+          script: |
+            set -e
+            cd ${{ inputs.working-directory }}
+            git pull origin ${{ inputs.git-branch }}
+
+            cat > .env.monitoring <<EOF
+            AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+            AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+            AWS_REGION=$AWS_REGION
+            GRAFANA_ADMIN_PASSWORD=$GRAFANA_ADMIN_PASSWORD
+            DOMAIN=$DOMAIN
+            EOF
+
+            docker compose -f ${{ inputs.compose-file }} --env-file .env.monitoring down
+            docker compose -f ${{ inputs.compose-file }} --env-file .env.monitoring pull
+            docker compose -f ${{ inputs.compose-file }} --env-file .env.monitoring up -d
+            docker system prune -f
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+          DOMAIN: ${{ secrets.DOMAIN }}
+
+      - name: Deployment summary
+        run: |
+          {
+            echo "## 📊 Monitoring Deployment"
+            echo "**Status:** ✅ Deployed"
+            echo "**Grafana:** https://${{ secrets.DOMAIN }}/"
+          } >> "$GITHUB_STEP_SUMMARY"
