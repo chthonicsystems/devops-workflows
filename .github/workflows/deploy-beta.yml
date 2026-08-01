@@ -328,10 +328,14 @@ jobs:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           MICROSOFT_CLIENT_ID: ${{ secrets.MICROSOFT_CLIENT_ID }}
           APPLE_CLIENT_ID: ${{ secrets.APPLE_CLIENT_ID }}
-          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
-          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
-          STRIPE_STANDARD_PRICE_ID: ${{ secrets.STRIPE_STANDARD_PRICE_ID }}
-          STRIPE_PREMIUM_PRICE_ID: ${{ secrets.STRIPE_PREMIUM_PRICE_ID }}
+          # Stripe: beta prefers dedicated *_BETA secrets (test-mode key +
+          # test-mode price/webhook ids) and falls back to the shared
+          # live-mode secrets when unset -- lets beta run Stripe test mode
+          # while prod stays on live mode.
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY_BETA || secrets.STRIPE_SECRET_KEY }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET_BETA || secrets.STRIPE_WEBHOOK_SECRET }}
+          STRIPE_STANDARD_PRICE_ID: ${{ secrets.STRIPE_STANDARD_PRICE_ID_BETA || secrets.STRIPE_STANDARD_PRICE_ID }}
+          STRIPE_PREMIUM_PRICE_ID: ${{ secrets.STRIPE_PREMIUM_PRICE_ID_BETA || secrets.STRIPE_PREMIUM_PRICE_ID }}
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
           TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
           TWILIO_PHONE_NUMBER: ${{ secrets.TWILIO_PHONE_NUMBER }}
