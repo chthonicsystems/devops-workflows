@@ -74,6 +74,15 @@ on:
         type: string
         required: false
         default: 'android internal'
+      api-url:
+        description: >-
+          Production API base URL baked into the web bundle as
+          REACT_APP_API_URL (e.g. https://torquetech.chthonicsystems.com).
+          Without it the shipped app falls back to localhost and every API
+          call fails (regression introduced when this workflow was lifted
+          from per-repo deploy-android.yml, whose native-build.sh exported it).
+        type: string
+        required: true
 
 permissions:
   actions: read
@@ -175,6 +184,7 @@ jobs:
       - name: Install web dependencies + build + cap sync
         if: steps.check.outputs.skip == 'false'
         env:
+          REACT_APP_API_URL: ${{ inputs.api-url }}
           REACT_APP_GOOGLE_CLIENT_ID: ${{ secrets.REACT_APP_GOOGLE_CLIENT_ID }}
           REACT_APP_GOOGLE_IOS_CLIENT_ID: ${{ secrets.REACT_APP_GOOGLE_IOS_CLIENT_ID }}
           REACT_APP_MICROSOFT_CLIENT_ID: ${{ secrets.REACT_APP_MICROSOFT_CLIENT_ID }}
@@ -186,6 +196,16 @@ jobs:
           npm ci --include=dev
           ./node_modules/.bin/ionic build
           ./node_modules/.bin/cap sync android
+
+      - name: Verify API URL baked into bundle
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          if ! grep -rq "${{ inputs.api-url }}" ${{ inputs.working-directory }}/build/static/js/ 2>/dev/null \
+            && ! grep -rq "${{ inputs.api-url }}" ${{ inputs.working-directory }}/build/assets/ 2>/dev/null; then
+            echo "::error::REACT_APP_API_URL (${{ inputs.api-url }}) not found in built JS bundle — the app would ship pointing at localhost"
+            exit 1
+          fi
+          echo "✅ API URL present in bundle"
 
       - name: Sync app version to native
         if: steps.check.outputs.skip == 'false'

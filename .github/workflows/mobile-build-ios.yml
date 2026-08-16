@@ -102,6 +102,15 @@ on:
         type: string
         required: false
         default: 'web/ios/metadata'
+      api-url:
+        description: >-
+          Production API base URL baked into the web bundle as
+          REACT_APP_API_URL (e.g. https://torquetech.chthonicsystems.com).
+          Without it the shipped app falls back to localhost and every API
+          call fails (regression introduced when this workflow was lifted
+          from per-repo deploy-ios.yml, which hardcoded it).
+        type: string
+        required: true
 
 permissions:
   actions: read
@@ -206,12 +215,22 @@ jobs:
 
       - name: Build web
         env:
+          REACT_APP_API_URL: ${{ inputs.api-url }}
           REACT_APP_GOOGLE_IOS_CLIENT_ID: ${{ secrets.REACT_APP_GOOGLE_IOS_CLIENT_ID }}
           REACT_APP_MICROSOFT_CLIENT_ID: ${{ secrets.REACT_APP_MICROSOFT_CLIENT_ID }}
           REACT_APP_APPLE_CLIENT_ID: ${{ secrets.REACT_APP_APPLE_CLIENT_ID }}
           REACT_APP_VERSION: ${{ needs.check-s3.outputs.version }}
           NODE_ENV: production
         run: cd ${{ inputs.working-directory }} && ./node_modules/.bin/ionic build
+
+      - name: Verify API URL baked into bundle
+        run: |
+          if ! grep -rq "${{ inputs.api-url }}" ${{ inputs.working-directory }}/build/static/js/ 2>/dev/null \
+            && ! grep -rq "${{ inputs.api-url }}" ${{ inputs.working-directory }}/build/assets/ 2>/dev/null; then
+            echo "::error::REACT_APP_API_URL (${{ inputs.api-url }}) not found in built JS bundle — the app would ship pointing at localhost"
+            exit 1
+          fi
+          echo "✅ API URL present in bundle"
 
       - name: Upload web build artefact
         uses: actions/upload-artifact@v4
