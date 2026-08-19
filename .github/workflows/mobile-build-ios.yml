@@ -23,7 +23,8 @@
 #   APP_STORE_CONNECT_API_KEY_BASE64 — base64 of the .p8 private key
 #   MATCH_PASSWORD                   — Fastlane match cert decryption pass
 #   MATCH_GIT_BASIC_AUTHORIZATION    — base64 token for private match cert repo
-#   REACT_APP_GOOGLE_IOS_CLIENT_ID, REACT_APP_MICROSOFT_CLIENT_ID
+#   REACT_APP_GOOGLE_CLIENT_ID, REACT_APP_GOOGLE_IOS_CLIENT_ID
+#   REACT_APP_MICROSOFT_CLIENT_ID
 #   REACT_APP_APPLE_CLIENT_ID
 #   CHTHONIC_PACKAGES_PAT            — optional; falls back to GITHUB_TOKEN
 
@@ -216,6 +217,11 @@ jobs:
       - name: Build web
         env:
           REACT_APP_API_URL: ${{ inputs.api-url }}
+          # Web client ID is required on ALL platforms: googleAuth.ts uses it
+          # as the base clientId and (on iOS) as iOSServerClientId for the
+          # server token exchange. Missing it = "Google Client ID not
+          # configured" on iOS even though the native iOS client ID is set.
+          REACT_APP_GOOGLE_CLIENT_ID: ${{ secrets.REACT_APP_GOOGLE_CLIENT_ID }}
           REACT_APP_GOOGLE_IOS_CLIENT_ID: ${{ secrets.REACT_APP_GOOGLE_IOS_CLIENT_ID }}
           REACT_APP_MICROSOFT_CLIENT_ID: ${{ secrets.REACT_APP_MICROSOFT_CLIENT_ID }}
           REACT_APP_APPLE_CLIENT_ID: ${{ secrets.REACT_APP_APPLE_CLIENT_ID }}
