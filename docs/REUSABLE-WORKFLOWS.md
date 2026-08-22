@@ -110,8 +110,11 @@ Optional caller `vars`:
 ## `deploy-prod.yml`
 
 Lifts TorqueTech's `deploy-prod.yml`. Finds the last green commit on
-the upstream beta workflow; builds a prod-flavoured web image (API +
-backup are reused from beta — no rebuild); SSH deploys to prod.
+the upstream beta workflow, optionally runs the full Playwright suite
+against that exact commit on the pre-production environment, then builds
+a prod-flavoured web image (API + backup are reused from beta) and SSH
+deploys to prod. A configured full-suite failure blocks all production
+build and deployment jobs.
 
 ### Caller usage
 
@@ -126,6 +129,8 @@ jobs:
     with:
       domain: torquetech.chthonicsystems.com
       docker-image-prefix: chthonicsystems/torquetech
+      full-e2e-base-url: https://torquetech-beta.chthonicsystems.com
+      full-e2e-runner-environment: beta
     secrets: inherit
 ```
 
@@ -135,6 +140,8 @@ jobs:
 |---|---|---|---|---|
 | `domain` | string | — | ✓ | Production domain |
 | `docker-image-prefix` | string | — | ✓ | Image-name prefix |
+| `full-e2e-base-url` | string | `''` | | Pre-production URL for the full Playwright gate; empty preserves legacy behavior |
+| `full-e2e-runner-environment` | string | `beta` | | GitHub Environment containing the gate credentials |
 | `upstream-workflow-file` | string | `deploy-beta.yml` | | Upstream for last-green check |
 | `working-directory` | string | `/opt/torquetech` | | Server-side directory |
 | `ssl-script` / `deploy-script` | string | `./scripts/setup-ssl-github.sh` / `./scripts/deploy-github.sh` | | Server-side scripts |
@@ -258,6 +265,7 @@ jobs:
 | Input | Type | Default | Purpose |
 |---|---|---|---|
 | `base-url` | string | — | Required — target environment URL |
+| `checkout-ref` | string | `''` | Git ref to test; empty uses the triggering workflow ref |
 | `spec-glob` | string | `''` | |
 | `working-directory` | string | `.` | |
 | `install-command` | string | `npm install` | |

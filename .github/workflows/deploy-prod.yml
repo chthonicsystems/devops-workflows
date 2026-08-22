@@ -1,17 +1,18 @@
 # Deploy production (reusable workflow).
 #
-# Lifted from torquetech .github/workflows/deploy-prod.yml. Four jobs:
+# Lifted from torquetech .github/workflows/deploy-prod.yml. Five jobs:
 #
 #   1. find-green-commit  — find last green commit on the upstream
 #                            (beta) workflow; skip if prod is up to date
-#   2. build-web-prod     — build the prod-flavoured web image with
+#   2. playwright-e2e-full — run the complete suite on beta at that exact SHA
+#   3. build-web-prod     — build the prod-flavoured web image with
 #                            REACT_APP_API_URL=https://${prod-domain}
 #                            (the API + backup images are reused from
 #                            beta — no rebuild needed)
-#   3. ssl-setup-prod     — bootstrap SSL inline (sed-substitute
+#   4. ssl-setup-prod     — bootstrap SSL inline (sed-substitute
 #                            DOMAIN_PLACEHOLDER in nginx/conf.d/default.conf.template).
 #                            Pre-PR-28 callers can still pass ssl-script for back-compat.
-#   4. deploy-prod        — SSH deploy via inputs.deploy-script
+#   5. deploy-prod        — SSH deploy via inputs.deploy-script
 #
 # Required caller secrets — same set as deploy-beta.yml plus:
 #   (none additional)
@@ -32,6 +33,16 @@ on:
         description: 'Image-name prefix (e.g. chthonicsystems/torquetech)'
         type: string
         required: true
+      full-e2e-base-url:
+        description: 'Pre-production URL for the full Playwright gate; empty disables the gate'
+        type: string
+        required: false
+        default: ''
+      full-e2e-runner-environment:
+        description: 'GitHub Environment containing credentials for the full Playwright gate'
+        type: string
+        required: false
+        default: 'beta'
       upstream-workflow-file:
         description: 'Upstream workflow file used to determine last-green commit'
         type: string
@@ -119,9 +130,26 @@ jobs:
             echo "**Deploy:** ${{ steps.find.outputs.should_proceed }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  build-web-prod:
+  playwright-e2e-full:
     needs: find-green-commit
-    if: needs.find-green-commit.outputs.should_deploy == 'true'
+    if: >-
+      needs.find-green-commit.outputs.should_deploy == 'true' &&
+      inputs.full-e2e-base-url != ''
+    uses: chthonicsystems/devops-workflows/.github/workflows/e2e-gate.yml@main
+    with:
+      base-url: ${{ inputs.full-e2e-base-url }}
+      checkout-ref: ${{ needs.find-green-commit.outputs.sha }}
+      report-name: playwright-report-pre-prod-full
+      summary-title: '🎭 Full Pre-Production E2E Gate'
+      runner-environment: ${{ inputs.full-e2e-runner-environment }}
+    secrets: inherit
+
+  build-web-prod:
+    needs: [find-green-commit, playwright-e2e-full]
+    if: >-
+      needs.find-green-commit.outputs.should_deploy == 'true' &&
+      (needs.playwright-e2e-full.result == 'success' ||
+       needs.playwright-e2e-full.result == 'skipped')
     runs-on: ${{ inputs.runs-on }}
     environment: ${{ inputs.runner-environment }}
     steps:

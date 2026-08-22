@@ -23,6 +23,11 @@ on:
         description: 'Target environment URL (e.g. https://torquetech-beta.chthonicsystems.com)'
         type: string
         required: true
+      checkout-ref:
+        description: 'Git ref to test; empty uses the triggering workflow ref'
+        type: string
+        required: false
+        default: ''
       spec-glob:
         description: 'Optional glob passed to npx playwright test'
         type: string
@@ -86,6 +91,8 @@ jobs:
     environment: ${{ inputs.runner-environment }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout-ref || github.sha }}
 
       - name: Run Playwright E2E gate
         uses: chthonicsystems/devops-workflows/actions/playwright-e2e-gate@main
