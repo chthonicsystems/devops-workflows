@@ -50,6 +50,12 @@ jobs:
     with:
       domain: torquetech-beta.chthonicsystems.com
       docker-image-prefix: chthonicsystems/torquetech
+      api-publish-project: ./api/TorqueTech.Api.csproj
+      api-publish-output: ./api/publish
+      api-runtime-dockerfile: ../Dockerfile.runtime
+      api-runtime-identifier: linux-x64
+      api-cache-from: type=registry,ref=chthonicsystems/torquetech-api:latest
+      api-cache-to: type=inline
     secrets: inherit
 ```
 
@@ -66,10 +72,28 @@ jobs:
 | `deploy-script` | string | `./scripts/deploy-github.sh` | | Server-side deploy script |
 | `git-branch` | string | `main` | | Branch to git pull on the server |
 | `api-context` / `web-context` / `backup-context` | string | `./api` / `./web` / `./backup` | | Build contexts |
+| `api-publish-project` | string | `''` | | Opts into Release-output reuse when set to the API project path |
+| `api-publish-output` | string | `'./api/publish'` | | Directory used to stage prepublished runtime output |
+| `api-runtime-dockerfile` | string | `'../Dockerfile.runtime'` | | Dockerfile path relative to the prepublished output context |
+| `api-runtime-identifier` | string | `''` | | Optional RID applied to both Release tests and no-build publish |
+| `api-cache-from` | string | `''` | | Optional API Buildx cache source; empty uses the scoped GHA cache |
+| `api-cache-to` | string | `''` | | Optional API Buildx cache destination; empty uses scoped GHA `mode=max` |
 | `app-version-json-path` | string | `web/app_version.json` | | Used for `REACT_APP_VERSION` build arg |
 | `runner-environment` | string | `beta` | | GitHub Environment name |
 | `runs-on` | string | `ubuntu-latest` | | Runner image |
 | `ssh-command-timeout` | string | `15m` | | SSH command timeout |
+
+When `api-publish-project` is configured, the API tests compile in Release mode and
+`dotnet publish --no-build --no-restore` stages that existing output. Set
+`api-runtime-identifier` to the deployment RID so both commands use the same
+RID-specific output and omit native assets for other platforms. The API image is
+then packaged with `api-runtime-dockerfile`, avoiding a second restore or compile
+inside Docker.
+
+For runtime-only images, `api-cache-from: type=registry,ref=<image>:latest` with
+`api-cache-to: type=inline` reuses stable image layers without a separate maximal
+GHA cache export. Leaving these inputs empty preserves the source-build path and
+existing scoped GHA cache behavior for other consumers.
 
 ### Required secrets (`secrets: inherit`)
 

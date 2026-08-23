@@ -1,5 +1,5 @@
 # Build a Docker image via buildx and push to a registry, with
-# multi-arch support and GitHub Actions cache.
+# multi-arch support and configurable caching (GHA by default).
 #
 # Wraps the canonical TT pattern (deploy-beta.yml uses this 3x for
 # api / web / backup; deploy-prod.yml uses it 1x for prod web):
@@ -7,13 +7,13 @@
 #   - docker/setup-buildx-action@v3
 #   - docker/login-action@v3 (DockerHub by default; configurable)
 #   - docker/metadata-action@v5 (auto-tag with branch-sha + raw tags)
-#   - docker/build-push-action@v5 (with cache-from/cache-to via GHA cache)
+#   - docker/build-push-action@v5 (GHA cache by default; caller-overridable)
 #
 # Lifted from torquetech .github/workflows/deploy-beta.yml +
 # deploy-prod.yml.
 
 name: Docker buildx + push
-description: 'buildx + multi-arch build + push to DockerHub (or other registry) with GHA cache'
+description: 'buildx + multi-arch build + push with configurable caching (scoped GHA by default)'
 
 inputs:
   image-name:
@@ -48,8 +48,16 @@ inputs:
     required: false
     default: 'true'
   cache-scope:
-    description: 'GHA cache scope (used in cache-from/cache-to)'
+    description: 'GHA cache scope used when cache-from/cache-to overrides are empty'
     required: true
+  cache-from:
+    description: 'Optional Buildx cache-from override; empty uses the scoped GHA cache'
+    required: false
+    default: ''
+  cache-to:
+    description: 'Optional Buildx cache-to override; empty uses the scoped GHA mode=max cache'
+    required: false
+    default: ''
   registry:
     description: 'Container registry to log into (default: DockerHub)'
     required: false
@@ -110,5 +118,5 @@ runs:
         tags: ${{ inputs.metadata-tags != '' && steps.meta.outputs.tags || inputs.tags }}
         build-args: ${{ inputs.build-args }}
         platforms: ${{ inputs.platforms }}
-        cache-from: type=gha,scope=${{ inputs.cache-scope }}
-        cache-to: type=gha,mode=max,scope=${{ inputs.cache-scope }}
+        cache-from: ${{ inputs.cache-from != '' && inputs.cache-from || format('type=gha,scope={0}', inputs.cache-scope) }}
+        cache-to: ${{ inputs.cache-to != '' && inputs.cache-to || format('type=gha,mode=max,scope={0}', inputs.cache-scope) }}
