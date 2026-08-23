@@ -97,6 +97,36 @@ on:
         type: string
         required: false
         default: './api'
+      api-publish-project:
+        description: 'Optional .NET project to prepublish after Release tests; empty keeps the source-build Docker path'
+        type: string
+        required: false
+        default: ''
+      api-publish-output:
+        description: 'Directory receiving prepublished API output and used as the runtime Docker context'
+        type: string
+        required: false
+        default: './api/publish'
+      api-runtime-dockerfile:
+        description: 'Runtime-only Dockerfile path relative to api-publish-output'
+        type: string
+        required: false
+        default: '../Dockerfile.runtime'
+      api-runtime-identifier:
+        description: 'Optional .NET runtime identifier shared by Release tests and no-build publish'
+        type: string
+        required: false
+        default: ''
+      api-cache-from:
+        description: 'Optional API Buildx cache-from override; empty retains scoped GHA cache'
+        type: string
+        required: false
+        default: ''
+      api-cache-to:
+        description: 'Optional API Buildx cache-to override; empty retains scoped GHA mode=max cache'
+        type: string
+        required: false
+        default: ''
       web-context:
         description: 'Build context for the web image'
         type: string
@@ -148,7 +178,29 @@ jobs:
         env:
           GITHUB_USERNAME: ${{ env.GITHUB_USERNAME }}
           GITHUB_PACKAGES_PAT: ${{ env.GITHUB_PACKAGES_PAT }}
-        run: cd api && dotnet test --verbosity minimal
+          API_RUNTIME_IDENTIFIER: ${{ inputs.api-runtime-identifier }}
+        run: |
+          runtime_args=()
+          if [ -n "$API_RUNTIME_IDENTIFIER" ]; then
+            runtime_args=(-r "$API_RUNTIME_IDENTIFIER")
+          fi
+          cd api
+          dotnet test -c Release "${runtime_args[@]}" --verbosity minimal
+
+      - name: Publish API runtime output
+        if: inputs.api-publish-project != ''
+        env:
+          GITHUB_USERNAME: ${{ env.GITHUB_USERNAME }}
+          GITHUB_PACKAGES_PAT: ${{ env.GITHUB_PACKAGES_PAT }}
+          API_RUNTIME_IDENTIFIER: ${{ inputs.api-runtime-identifier }}
+        run: |
+          runtime_args=()
+          if [ -n "$API_RUNTIME_IDENTIFIER" ]; then
+            runtime_args=(-r "$API_RUNTIME_IDENTIFIER" --self-contained false)
+          fi
+          dotnet publish "${{ inputs.api-publish-project }}" \
+            -c Release "${runtime_args[@]}" --no-build --no-restore \
+            -o "${{ inputs.api-publish-output }}"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -169,7 +221,8 @@ jobs:
         uses: chthonicsystems/devops-workflows/actions/docker-buildx-push@main
         with:
           image-name: ${{ inputs.docker-image-prefix }}-api
-          context: ${{ inputs.api-context }}
+          context: ${{ inputs.api-publish-project != '' && inputs.api-publish-output || inputs.api-context }}
+          dockerfile: ${{ inputs.api-publish-project != '' && inputs.api-runtime-dockerfile || 'Dockerfile' }}
           metadata-tags: |
             type=sha,prefix={{branch}}-
             type=raw,value=latest
@@ -177,6 +230,8 @@ jobs:
             GITHUB_USERNAME=${{ env.GITHUB_USERNAME }}
             GITHUB_PACKAGES_PAT=${{ env.GITHUB_PACKAGES_PAT }}
           cache-scope: api
+          cache-from: ${{ inputs.api-cache-from }}
+          cache-to: ${{ inputs.api-cache-to }}
           registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
           registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
 

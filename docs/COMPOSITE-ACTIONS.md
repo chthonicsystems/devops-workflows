@@ -178,7 +178,7 @@ Wait-for-API-readiness loop + `npx playwright test` + artifact upload
 ## `docker-buildx-push`
 
 `setup-buildx` + `metadata-action` (when `metadata-tags` set) +
-`build-push-action` with GHA cache.
+`build-push-action` with scoped GHA caching by default and optional cache overrides.
 
 ```yaml
 # Pattern A: with metadata-action tag rules (auto branch-sha + raw tags)
@@ -203,6 +203,19 @@ Wait-for-API-readiness loop + `npx playwright test` + artifact upload
       REACT_APP_API_URL=https://torquetech-beta.chthonicsystems.com
     cache-scope: web-beta
     skip-login: 'true'   # caller already logged in via earlier docker-buildx-push step
+
+# Pattern C: runtime-only image with registry import + inline cache export
+- uses: chthonicsystems/devops-workflows/actions/docker-buildx-push@v0
+  with:
+    image-name: chthonicsystems/torquetech-api
+    context: ./api/publish
+    dockerfile: ../Dockerfile.runtime
+    tags: chthonicsystems/torquetech-api:latest
+    cache-scope: api
+    cache-from: type=registry,ref=chthonicsystems/torquetech-api:latest
+    cache-to: type=inline
+    registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
+    registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
 ```
 
 | Input | Default | Purpose |
@@ -215,7 +228,9 @@ Wait-for-API-readiness loop + `npx playwright test` + artifact upload
 | `build-args` | `''` | Multiline KEY=VALUE |
 | `platforms` | `''` | E.g. `linux/amd64,linux/arm64` |
 | `push` | `true` | |
-| `cache-scope` | — (required) | |
+| `cache-scope` | — (required) | Scoped GHA cache key used when overrides are empty |
+| `cache-from` | `''` | Optional Buildx cache source; empty uses scoped GHA cache |
+| `cache-to` | `''` | Optional Buildx cache destination; empty uses scoped GHA `mode=max` |
 | `registry` | `docker.io` | |
 | `registry-username` | `''` | |
 | `registry-password` | `''` | |
