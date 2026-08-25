@@ -177,6 +177,9 @@ jobs:
         uses: chthonicsystems/devops-workflows/actions/docker-buildx-push@main
         with:
           image-name: ${{ inputs.docker-image-prefix }}-web
+          # Pin amd64 (DO droplets are linux/amd64) so local/act builds on
+          # Apple Silicon produce droplet-compatible images, not arm64.
+          platforms: linux/amd64
           context: ${{ inputs.web-context }}
           tags: |
             ${{ inputs.docker-image-prefix }}-web:latest

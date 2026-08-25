@@ -221,6 +221,10 @@ jobs:
         uses: chthonicsystems/devops-workflows/actions/docker-buildx-push@main
         with:
           image-name: ${{ inputs.docker-image-prefix }}-api
+          # Pin amd64 so builds are deterministic regardless of host arch
+          # (DO droplets are linux/amd64; lets `act`/local builds on Apple
+          # Silicon produce droplet-compatible images instead of arm64).
+          platforms: linux/amd64
           context: ${{ inputs.api-publish-project != '' && inputs.api-publish-output || inputs.api-context }}
           dockerfile: ${{ inputs.api-publish-project != '' && inputs.api-runtime-dockerfile || 'Dockerfile' }}
           metadata-tags: |
@@ -239,6 +243,7 @@ jobs:
         uses: chthonicsystems/devops-workflows/actions/docker-buildx-push@main
         with:
           image-name: ${{ inputs.docker-image-prefix }}-web
+          platforms: linux/amd64
           context: ${{ inputs.web-context }}
           tags: ${{ inputs.docker-image-prefix }}-web:${{ inputs.web-image-tag }}
           build-args: |
@@ -264,6 +269,7 @@ jobs:
         uses: chthonicsystems/devops-workflows/actions/docker-buildx-push@main
         with:
           image-name: ${{ inputs.docker-image-prefix }}-backup
+          platforms: linux/amd64
           context: ${{ inputs.backup-context }}
           metadata-tags: |
             type=sha,prefix={{branch}}-
