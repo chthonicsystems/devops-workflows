@@ -112,6 +112,26 @@ on:
           from per-repo deploy-ios.yml, which hardcoded it).
         type: string
         required: true
+      react-app-google-client-id:
+        description: 'Public Google web OAuth client ID (compiled into the bundle, non-secret).'
+        type: string
+        required: false
+        default: ''
+      react-app-google-ios-client-id:
+        description: 'Public Google iOS OAuth client ID.'
+        type: string
+        required: false
+        default: ''
+      react-app-microsoft-client-id:
+        description: 'Public Microsoft (MSAL) client ID.'
+        type: string
+        required: false
+        default: ''
+      react-app-apple-client-id:
+        description: 'Public Apple services ID.'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   actions: read
@@ -221,10 +241,10 @@ jobs:
           # as the base clientId and (on iOS) as iOSServerClientId for the
           # server token exchange. Missing it = "Google Client ID not
           # configured" on iOS even though the native iOS client ID is set.
-          REACT_APP_GOOGLE_CLIENT_ID: ${{ secrets.REACT_APP_GOOGLE_CLIENT_ID }}
-          REACT_APP_GOOGLE_IOS_CLIENT_ID: ${{ secrets.REACT_APP_GOOGLE_IOS_CLIENT_ID }}
-          REACT_APP_MICROSOFT_CLIENT_ID: ${{ secrets.REACT_APP_MICROSOFT_CLIENT_ID }}
-          REACT_APP_APPLE_CLIENT_ID: ${{ secrets.REACT_APP_APPLE_CLIENT_ID }}
+          REACT_APP_GOOGLE_CLIENT_ID: ${{ inputs.react-app-google-client-id }}
+          REACT_APP_GOOGLE_IOS_CLIENT_ID: ${{ inputs.react-app-google-ios-client-id }}
+          REACT_APP_MICROSOFT_CLIENT_ID: ${{ inputs.react-app-microsoft-client-id }}
+          REACT_APP_APPLE_CLIENT_ID: ${{ inputs.react-app-apple-client-id }}
           REACT_APP_VERSION: ${{ needs.check-s3.outputs.version }}
           NODE_ENV: production
         run: cd ${{ inputs.working-directory }} && ./node_modules/.bin/ionic build
