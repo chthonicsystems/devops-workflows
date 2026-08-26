@@ -83,6 +83,29 @@ on:
           from per-repo deploy-android.yml, whose native-build.sh exported it).
         type: string
         required: true
+      react-app-google-client-id:
+        description: >-
+          Public Google web OAuth client ID baked into the bundle. Non-secret
+          (compiled into the browser bundle). If omitted, falls back to the
+          REACT_APP_GOOGLE_CLIENT_ID secret for backward compatibility.
+        type: string
+        required: false
+        default: ''
+      react-app-google-ios-client-id:
+        description: 'Public Google iOS OAuth client ID. Falls back to secret if omitted.'
+        type: string
+        required: false
+        default: ''
+      react-app-microsoft-client-id:
+        description: 'Public Microsoft (MSAL) client ID. Falls back to secret if omitted.'
+        type: string
+        required: false
+        default: ''
+      react-app-apple-client-id:
+        description: 'Public Apple services ID. Falls back to secret if omitted.'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   actions: read
@@ -185,10 +208,10 @@ jobs:
         if: steps.check.outputs.skip == 'false'
         env:
           REACT_APP_API_URL: ${{ inputs.api-url }}
-          REACT_APP_GOOGLE_CLIENT_ID: ${{ secrets.REACT_APP_GOOGLE_CLIENT_ID }}
-          REACT_APP_GOOGLE_IOS_CLIENT_ID: ${{ secrets.REACT_APP_GOOGLE_IOS_CLIENT_ID }}
-          REACT_APP_MICROSOFT_CLIENT_ID: ${{ secrets.REACT_APP_MICROSOFT_CLIENT_ID }}
-          REACT_APP_APPLE_CLIENT_ID: ${{ secrets.REACT_APP_APPLE_CLIENT_ID }}
+          REACT_APP_GOOGLE_CLIENT_ID: ${{ inputs.react-app-google-client-id || secrets.REACT_APP_GOOGLE_CLIENT_ID }}
+          REACT_APP_GOOGLE_IOS_CLIENT_ID: ${{ inputs.react-app-google-ios-client-id || secrets.REACT_APP_GOOGLE_IOS_CLIENT_ID }}
+          REACT_APP_MICROSOFT_CLIENT_ID: ${{ inputs.react-app-microsoft-client-id || secrets.REACT_APP_MICROSOFT_CLIENT_ID }}
+          REACT_APP_APPLE_CLIENT_ID: ${{ inputs.react-app-apple-client-id || secrets.REACT_APP_APPLE_CLIENT_ID }}
           REACT_APP_VERSION: ${{ steps.version.outputs.version }}
           NODE_ENV: production
         run: |
