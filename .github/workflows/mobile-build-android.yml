@@ -208,10 +208,10 @@ jobs:
         if: steps.check.outputs.skip == 'false'
         env:
           REACT_APP_API_URL: ${{ inputs.api-url }}
-          REACT_APP_GOOGLE_CLIENT_ID: ${{ inputs.react-app-google-client-id || secrets.REACT_APP_GOOGLE_CLIENT_ID }}
-          REACT_APP_GOOGLE_IOS_CLIENT_ID: ${{ inputs.react-app-google-ios-client-id || secrets.REACT_APP_GOOGLE_IOS_CLIENT_ID }}
-          REACT_APP_MICROSOFT_CLIENT_ID: ${{ inputs.react-app-microsoft-client-id || secrets.REACT_APP_MICROSOFT_CLIENT_ID }}
-          REACT_APP_APPLE_CLIENT_ID: ${{ inputs.react-app-apple-client-id || secrets.REACT_APP_APPLE_CLIENT_ID }}
+          REACT_APP_GOOGLE_CLIENT_ID: ${{ inputs.react-app-google-client-id }}
+          REACT_APP_GOOGLE_IOS_CLIENT_ID: ${{ inputs.react-app-google-ios-client-id }}
+          REACT_APP_MICROSOFT_CLIENT_ID: ${{ inputs.react-app-microsoft-client-id }}
+          REACT_APP_APPLE_CLIENT_ID: ${{ inputs.react-app-apple-client-id }}
           REACT_APP_VERSION: ${{ steps.version.outputs.version }}
           NODE_ENV: production
         run: |
