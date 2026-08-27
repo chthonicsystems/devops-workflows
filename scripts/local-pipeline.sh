@@ -77,8 +77,25 @@ if want prod && [ "$SKIP_PROD" = 0 ]; then
 fi
 
 # Mobile stages load the secrets-file into the environment for fastlane.
-mobile_env() { set -a; # shellcheck disable=SC1090
-  . "$SECRETS"; set +a; }
+# Parse literally (no shell-sourcing) so values with $, spaces, quotes, () are safe.
+load_secrets() {
+  local file="$1" line key val
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"          # ltrim
+    [ -z "$line" ] && continue
+    case "$line" in '#'*) continue ;; *=*) ;; *) continue ;; esac
+    key="${line%%=*}"; val="${line#*=}"
+    key="${key%"${key##*[![:space:]]}"}"             # rtrim key
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    if [ "${#val}" -ge 2 ] && [ "${val:0:1}" = "'" ] && [ "${val: -1}" = "'" ]; then
+      val="${val:1:${#val}-2}"
+    elif [ "${#val}" -ge 2 ] && [ "${val:0:1}" = '"' ] && [ "${val: -1}" = '"' ]; then
+      val="${val:1:${#val}-2}"
+    fi
+    export "$key=$val"
+  done < "$file"
+}
+mobile_env() { load_secrets "$SECRETS"; }
 
 # ---- 4. Android — AAB → Play Store + S3 ----------------------------------
 if want android && [ "$SKIP_MOBILE" = 0 ]; then

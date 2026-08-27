@@ -58,8 +58,28 @@ esac
 IMG=chthonicsystems/torquetech-web
 SSH="ssh -i $SSH_KEY -o BatchMode=yes -o ConnectTimeout=20 root@$HOST"
 
-# shellcheck disable=SC1090
-set -a; . "$SECRETS"; set +a
+# Load the KEY=VALUE secrets file WITHOUT shell-sourcing it. Values are taken literally
+# (no $-expansion, command substitution, or word splitting), so secrets containing $,
+# spaces, parentheses, quotes, backticks, etc. are safe. One optional pair of surrounding
+# single or double quotes is stripped; the value is otherwise verbatim to end of line.
+load_secrets() {
+  local file="$1" line key val
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"          # ltrim
+    [ -z "$line" ] && continue
+    case "$line" in '#'*) continue ;; *=*) ;; *) continue ;; esac
+    key="${line%%=*}"; val="${line#*=}"
+    key="${key%"${key##*[![:space:]]}"}"             # rtrim key
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    if [ "${#val}" -ge 2 ] && [ "${val:0:1}" = "'" ] && [ "${val: -1}" = "'" ]; then
+      val="${val:1:${#val}-2}"
+    elif [ "${#val}" -ge 2 ] && [ "${val:0:1}" = '"' ] && [ "${val: -1}" = '"' ]; then
+      val="${val:1:${#val}-2}"
+    fi
+    export "$key=$val"
+  done < "$file"
+}
+load_secrets "$SECRETS"
 
 WT="$(mktemp -d /tmp/tt-localdeploy.XXXX)"
 cleanup(){ git -C "$REPO" worktree remove --force "$WT" 2>/dev/null || rm -rf "$WT"; }
