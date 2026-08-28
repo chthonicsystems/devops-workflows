@@ -58,6 +58,11 @@
 #     GOOGLE_PLACES_API_KEY GH_SUPPORT_TOKEN
 #   (any missing optional feature secret just leaves that feature unconfigured;
 #    only the boot-critical trio is enforced.)
+#   prod preflight (component/env prod, enforced only when set):
+#     ACCOUNTING_LAUNCH=true  -> runs CI's validate-accounting-production gate
+#       (prod Xero/QB secrets present, QuickBooks on the production Intuit
+#        endpoint, redirect/frontend URLs == prod origin, /app/keys is a
+#        persistent named volume). Advisory no-op when unset/!=true.
 set -euo pipefail
 
 ENV="" REF="origin/main" REPO="" SECRETS="" MODE="surgical" SSH_KEY="${HOME}/chthonicsystems/.ssh/id_rsa" COMPONENT="web" DRYRUN=false
@@ -114,6 +119,43 @@ load_secrets() {
 }
 load_secrets "$SECRETS"
 
+# Prod-only preflight, mirroring CI's validate-accounting-production gate in
+# deploy-prod.yml. Enforced only when ACCOUNTING_LAUNCH=true (set it in the
+# secrets-file or environment); advisory no-op otherwise, exactly like CI's
+# pre-launch behaviour. Read-only (docker compose config needs no daemon), so it
+# also runs under --dry-run. Checks: prod Xero/QB secrets present; QuickBooks
+# points at the production Intuit endpoint; redirect/frontend URLs match the prod
+# origin; and the /app/keys data-protection volume is a persistent named volume.
+preflight_prod_accounting() {
+  local origin="https://$DOMAIN" safe_config field missing=""
+  if [ "${ACCOUNTING_LAUNCH:-}" != "true" ]; then
+    echo ">> [preflight] ACCOUNTING_LAUNCH!=true -- skipping production Accounting enforcement (advisory)"
+    return 0
+  fi
+  command -v jq >/dev/null 2>&1 || die "prod preflight needs jq (brew install jq)"
+  for name in XERO_CLIENT_ID XERO_CLIENT_SECRET XERO_WEBHOOK_KEY \
+              QB_CLIENT_ID QB_CLIENT_SECRET QB_WEBHOOK_VERIFIER_TOKEN; do
+    [ -n "${!name:-}" ] || missing="$missing $name"
+  done
+  [ -z "$missing" ] || die "prod preflight: missing production Accounting secrets in $SECRETS:$missing"
+  safe_config="$(docker compose -f "$WT/docker-compose.yml" -f "$WT/docker-compose.prod.override.yml" config --format json 2>/dev/null \
+    | jq -c '{
+        qbApiBaseUrl: .services.api.environment.QB_API_BASE_URL,
+        redirectBaseUrl: .services.api.environment.ACCOUNTING_REDIRECT_BASE_URL,
+        frontendUrl: .services.api.environment.FRONTEND_URL,
+        keyVolumeCount: ([.services.api.volumes[] | select(.type == "volume" and .target == "/app/keys")] | length)
+      }')"
+  [ "$(jq -r '.qbApiBaseUrl' <<<"$safe_config")" = "https://quickbooks.api.intuit.com" ] \
+    || die "prod preflight: QuickBooks API host is not the production endpoint"
+  for field in redirectBaseUrl frontendUrl; do
+    [ "$(jq -r --arg f "$field" '.[$f]' <<<"$safe_config")" = "$origin" ] \
+      || die "prod preflight: production $field does not match $origin"
+  done
+  [ "$(jq -r '.keyVolumeCount' <<<"$safe_config")" = "1" ] \
+    || die "prod preflight: production data-protection key volume is not persistent"
+  echo ">> [preflight] production Accounting + data-protection key-volume checks passed"
+}
+
 WT="$(mktemp -d /tmp/tt-localdeploy.XXXX)"
 REMOTE_TMP=""
 cleanup(){ git -C "$REPO" worktree remove --force "$WT" 2>/dev/null || rm -rf "$WT"; [ -n "$REMOTE_TMP" ] && rm -f "$REMOTE_TMP"; }
@@ -150,6 +192,10 @@ if [ "$FULL_DEPLOY" = true ]; then
 fi
 
 SKIP_BACKUP=$([ "$ENV" = beta ] && echo true || echo false)
+
+# prod parity: run CI's validate-accounting-production gate before any prod
+# deploy (read-only; runs in dry-run too).
+[ "$ENV" = prod ] && preflight_prod_accounting
 
 if [ "$DRYRUN" = true ]; then
   echo ">> [dry-run] build_web=$build_web build_api=$build_api full_deploy=$FULL_DEPLOY skip_backup=$SKIP_BACKUP"
