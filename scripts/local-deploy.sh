@@ -325,11 +325,11 @@ REMOTE_EOF
 fi
 
 # --- verify ---
-code=$(curl -k -s -o /dev/null -w '%{http_code}' "https://$DOMAIN/")
+code=$(curl -k -s --connect-timeout 5 --max-time 15 -o /dev/null -w '%{http_code}' "https://$DOMAIN/")
 echo ">> https://$DOMAIN/ -> $code ; deployed [$COMPONENT] $VER ($SHA) to $ENV"
 [ "$code" = 200 ] || die "site did not return 200"
 if [ "$FULL_DEPLOY" = true ]; then
-  acode=$(curl -k -s -o /dev/null -w '%{http_code}' "https://$DOMAIN/health")
+  acode=$(curl -k -s --connect-timeout 5 --max-time 15 -o /dev/null -w '%{http_code}' "https://$DOMAIN/health")
   echo ">> https://$DOMAIN/health -> $acode"
   [ "$acode" = 200 ] || die "API health endpoint did not return 200"
 fi

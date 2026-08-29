@@ -121,7 +121,10 @@ if want android && [ "$SKIP_MOBILE" = 0 ]; then
     export REACT_APP_VERSION="$(node -e 'const d=require("./app_version.json");console.log(d.latest)')"
     run npm ci --include=dev
     run ./node_modules/.bin/ionic build
-    run ./node_modules/.bin/cap sync android )
+    run ./node_modules/.bin/cap sync android
+    # app_version.json is authoritative; fail closed before Gradle so a stale
+    # tracked versionCode cannot be uploaded (or rejected as already used).
+    run npx --package=@chthonicsystems/devops-scripts version-sync sync-version --platform android )
   ( cd "$REPO" && run bundle exec fastlane android internal )
   # S3 mirror (fastlane lane already uploads to Play Store; mirror the signed AAB too)
   AAB="$REPO/web/android/app/build/outputs/bundle/release/app-release.aab"
