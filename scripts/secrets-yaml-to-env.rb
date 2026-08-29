@@ -65,6 +65,8 @@ env = {
   "TWILIO_AUTH_TOKEN" => dig!(data, "local_deploy", "twilio_auth_token"),
   "GOOGLE_PLACES_API_KEY" => dig!(data, "google_places_api_key"),
   "GH_SUPPORT_TOKEN" => dig!(data, "gh_support_token"),
+  "E2E_ADMIN_USERNAME" => dig!(data, "e2e_beta", "admin_username"),
+  "E2E_ADMIN_PASSWORD" => dig!(data, "e2e_beta", "admin_password"),
 
   # Production provider values (base keys).
   "ACCOUNTING_LAUNCH" => "true",

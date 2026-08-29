@@ -61,6 +61,27 @@ cleanup() {
 trap cleanup EXIT
 ruby "$SCRIPT_DIR/secrets-yaml-to-env.rb" "$SECRETS_YAML" "$SECRETS"
 
+# Load the mapped env once, before any stage. Parse literally (no shell-sourcing)
+# so values with $, spaces, quotes, and parentheses are safe.
+load_secrets() {
+  local file="$1" line key val
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    [ -z "$line" ] && continue
+    case "$line" in '#'*) continue ;; *=*) ;; *) continue ;; esac
+    key="${line%%=*}"; val="${line#*=}"
+    key="${key%"${key##*[![:space:]]}"}"
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    if [ "${#val}" -ge 2 ] && [ "${val:0:1}" = "'" ] && [ "${val: -1}" = "'" ]; then
+      val="${val:1:${#val}-2}"
+    elif [ "${#val}" -ge 2 ] && [ "${val:0:1}" = '"' ] && [ "${val: -1}" = '"' ]; then
+      val="${val:1:${#val}-2}"
+    fi
+    export "$key=$val"
+  done < "$file"
+}
+load_secrets "$SECRETS"
+
 run() { echo "+ $*"; [ "$DRY" = 1 ] && return 0; "$@"; }
 run_secret() { local label="$1"; shift; echo "+ $label [secret arguments redacted]"; [ "$DRY" = 1 ] && return 0; "$@"; }
 want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
@@ -89,31 +110,12 @@ if want prod && [ "$SKIP_PROD" = 0 ]; then
   run "$SCRIPT_DIR/local-deploy.sh" --env prod --repo "$REPO" --secrets-yaml "$SECRETS_YAML" --ref "$REF" --component all
 fi
 
-# Mobile stages load the ephemeral mapped env into the process for fastlane.
-# Parse literally (no shell-sourcing) so values with $, spaces, quotes, () are safe.
-load_secrets() {
-  local file="$1" line key val
-  while IFS= read -r line || [ -n "$line" ]; do
-    line="${line#"${line%%[![:space:]]*}"}"          # ltrim
-    [ -z "$line" ] && continue
-    case "$line" in '#'*) continue ;; *=*) ;; *) continue ;; esac
-    key="${line%%=*}"; val="${line#*=}"
-    key="${key%"${key##*[![:space:]]}"}"             # rtrim key
-    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-    if [ "${#val}" -ge 2 ] && [ "${val:0:1}" = "'" ] && [ "${val: -1}" = "'" ]; then
-      val="${val:1:${#val}-2}"
-    elif [ "${#val}" -ge 2 ] && [ "${val:0:1}" = '"' ] && [ "${val: -1}" = '"' ]; then
-      val="${val:1:${#val}-2}"
-    fi
-    export "$key=$val"
-  done < "$file"
-}
-mobile_env() { load_secrets "$SECRETS"; }
+# The mapped environment is already loaded before Stage 1, so deploy, test, and
+# mobile stages all use the same credentials and release metadata.
 
 # ---- 4. Android — AAB → Play Store + S3 ----------------------------------
 if want android && [ "$SKIP_MOBILE" = 0 ]; then
   log "STAGE 4/5 — Android: build + Play Store + S3"
-  mobile_env
   ( cd "$REPO/web"
     export REACT_APP_API_URL="$PROD_URL" NODE_ENV=production
     export REACT_APP_VERSION="$(node -e 'const d=require("./app_version.json");console.log(d.latest)')"
@@ -133,7 +135,6 @@ fi
 # ---- 5. iOS — TestFlight + App Store review ------------------------------
 if want ios && [ "$SKIP_MOBILE" = 0 ]; then
   log "STAGE 5/5 — iOS: TestFlight (beta) + App Store review (release)"
-  mobile_env
   # macOS: seed the distribution identity into a dedicated keychain, because
   # `security import` rejects match's empty-password p12 on recent macOS. match
   # then finds the identity already present and gym signs with it.
