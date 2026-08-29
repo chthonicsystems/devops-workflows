@@ -10,13 +10,14 @@
 #      matching manifest for linux/amd64"). This is why the reusable workflow
 #      pins platforms.
 #   2. Deploy on the droplet, by --component:
-#        web  (default) -> surgical web-container swap (fast; api/db untouched,
-#                          NO migrations). Good for frontend-only releases.
-#        api | all      -> full ./scripts/deploy-github.sh: staged bring-up
+#        all  (default) -> full ./scripts/deploy-github.sh: staged bring-up
 #                          mysql -> api (runs EF migrations, RUN_MIGRATIONS=true)
 #                          -> web, with the COMPLETE runtime-secret env mapped
 #                          from ~/chthonicsystems/secrets.yaml. This is full parity
 #                          with CI's deploy job (build api+web -> deploy-github.sh).
+#        api            -> build API, then run the same full staged deploy.
+#        web            -> explicit surgical web-container swap (fast; api/db
+#                          untouched, NO migrations). Frontend-only releases only.
 #
 # Local secrets come directly from the consolidated secrets.yaml inventory. The
 # script maps only the required keys into a short-lived 0600 env file, parses it
@@ -30,14 +31,14 @@
 # Silicon is slow (qemu); expect several minutes.
 #
 # Usage (secrets.yaml defaults to ~/chthonicsystems/secrets.yaml):
-#   # fast web-only (default):
+#   # full api+web deploy (default; rebuilds api, runs migrations):
 #   ./local-deploy.sh --env beta --repo /path/to/torquetech
-#   # full api+web parity (rebuilds api, runs migrations):
-#   ./local-deploy.sh --env beta --repo /path/to/torquetech --component all
-#   # api only, alternate inventory path:
+#   # explicit frontend-only surgical swap:
+#   ./local-deploy.sh --env beta --repo /path/to/torquetech --component web
+#   # api build + full staged deploy:
 #   ./local-deploy.sh --env prod --repo ... --secrets-yaml /path/to/secrets.yaml --component api --ref origin/main
-#   # preview, no side effects:
-#   ./local-deploy.sh --env beta --repo ... --component all --dry-run
+#   # preview the default full path with no side effects:
+#   ./local-deploy.sh --env beta --repo ... --dry-run
 #
 # Required secrets.yaml mappings are maintained by scripts/secrets-yaml-to-env.rb:
 #   web build args (component web|all):
@@ -72,7 +73,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV="" REF="origin/main" REPO="" SECRETS_YAML="${HOME}/chthonicsystems/secrets.yaml" MODE="surgical" SSH_KEY="${HOME}/chthonicsystems/.ssh/id_rsa" COMPONENT="web" DRYRUN=false
+ENV="" REF="origin/main" REPO="" SECRETS_YAML="${HOME}/chthonicsystems/secrets.yaml" MODE="surgical" SSH_KEY="${HOME}/chthonicsystems/.ssh/id_rsa" COMPONENT="all" DRYRUN=false
 while [ $# -gt 0 ]; do case "$1" in
   --env) ENV="$2"; shift 2;;
   --ref) REF="$2"; shift 2;;
@@ -80,7 +81,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --secrets-yaml) SECRETS_YAML="$2"; shift 2;;
   --mode) MODE="$2"; shift 2;;          # surgical | full (web only; api/all force full)
   --ssh-key) SSH_KEY="$2"; shift 2;;
-  --component) COMPONENT="$2"; shift 2;; # web (default) | api | all
+  --component) COMPONENT="$2"; shift 2;; # all (default) | api | web
   --dry-run) DRYRUN=true; shift;;        # print planned actions, no side effects
   -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
   *) echo "unknown arg: $1" >&2; exit 2;;

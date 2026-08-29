@@ -39,21 +39,22 @@ droplet. CI remains separate: GitHub Actions uses GitHub Environment secrets and
 never reads this local file.
 
 ```bash
-# Full beta deploy: api + web, EF migrations, beta provider credentials.
+# Full beta deploy (default): api + web, EF migrations, beta provider credentials.
 scripts/local-deploy.sh \
   --env beta \
-  --repo ~/chthonicsystems/torquetech \
-  --component all
+  --repo ~/chthonicsystems/torquetech
 
-# Full prod deploy: accounting preflight, api + web, migrations, backup enabled.
+# Full prod deploy (default): accounting preflight, api + web, migrations, backup enabled.
 scripts/local-deploy.sh \
   --env prod \
   --repo ~/chthonicsystems/torquetech \
-  --component all \
   --ref origin/main
 
-# Frontend-only fast path: surgical web swap; api/mysql untouched.
-scripts/local-deploy.sh --env beta --repo ~/chthonicsystems/torquetech
+# Frontend-only fast path must be explicit: surgical web swap; api/mysql untouched.
+scripts/local-deploy.sh \
+  --env beta \
+  --repo ~/chthonicsystems/torquetech \
+  --component web
 
 # Preview any path with no build, push, deploy, or store submission.
 scripts/local-deploy.sh \
@@ -66,10 +67,11 @@ scripts/local-deploy.sh \
 scripts/local-pipeline.sh --repo ~/chthonicsystems/torquetech --dry-run
 ```
 
-`--component web` (default) performs the surgical web-only swap. `--component
-api|all` builds the linux/amd64 API image and always runs the full staged
-deployment (`mysql -> api/migrations -> web`). On prod it also runs the same
-accounting/data-protection preflight as CI.
+The default (`--component all`) builds the linux/amd64 API and web images and
+runs the full staged deployment (`mysql -> api/migrations -> web`). `--component
+api` builds the API and runs that same full staged deploy. `--component web` is
+the explicit reduced path for a surgical web-only swap. On prod, every full
+staged deploy also runs the same accounting/data-protection preflight as CI.
 
 ## Recovering the public web build args
 
