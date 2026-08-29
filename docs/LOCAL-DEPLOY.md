@@ -31,33 +31,45 @@ when `api/` actually changed; frontend releases are web-only.
 
 ## Usage
 
+Local deploys read the consolidated inventory directly from
+`~/chthonicsystems/secrets.yaml` (override with `--secrets-yaml`). The scripts map
+only the required values into a short-lived mode-`0600` env file and remove it on
+exit. They never shell-source the YAML and never copy the full inventory to a
+droplet. CI remains separate: GitHub Actions uses GitHub Environment secrets and
+never reads this local file.
+
 ```bash
-# secrets file (KEY=VALUE, git-ignored) with public web build args + tokens
-cat > deploy.secrets <<'EOF'
-GITHUB_PACKAGES_PAT=...
-DOCKERHUB_USERNAME=chthonicsystems
-DOCKERHUB_TOKEN=...
-REACT_APP_GOOGLE_CLIENT_ID=...
-REACT_APP_MICROSOFT_CLIENT_ID=...
-REACT_APP_APPLE_CLIENT_ID=...
-REACT_APP_FIREBASE_API_KEY=...
-REACT_APP_FIREBASE_AUTH_DOMAIN=...
-REACT_APP_FIREBASE_PROJECT_ID=...
-REACT_APP_FIREBASE_STORAGE_BUCKET=...
-REACT_APP_FIREBASE_MESSAGING_SENDER_ID=...
-REACT_APP_FIREBASE_APP_ID=...
-EOF
+# Full beta deploy: api + web, EF migrations, beta provider credentials.
+scripts/local-deploy.sh \
+  --env beta \
+  --repo ~/chthonicsystems/torquetech \
+  --component all
 
-# beta (surgical web swap; api/mysql untouched, no down/up)
-scripts/local-deploy.sh --env beta --repo ~/chthonicsystems/torquetech --secrets-file ./deploy.secrets
+# Full prod deploy: accounting preflight, api + web, migrations, backup enabled.
+scripts/local-deploy.sh \
+  --env prod \
+  --repo ~/chthonicsystems/torquetech \
+  --component all \
+  --ref origin/main
 
-# prod (from origin/main HEAD)
-scripts/local-deploy.sh --env prod --repo ~/chthonicsystems/torquetech --secrets-file ./deploy.secrets --ref origin/main
+# Frontend-only fast path: surgical web swap; api/mysql untouched.
+scripts/local-deploy.sh --env beta --repo ~/chthonicsystems/torquetech
+
+# Preview any path with no build, push, deploy, or store submission.
+scripts/local-deploy.sh \
+  --env prod \
+  --repo ~/chthonicsystems/torquetech \
+  --component all \
+  --dry-run
+
+# Entire release chain: beta(api+web) -> full suite -> prod(api+web) -> mobile.
+scripts/local-pipeline.sh --repo ~/chthonicsystems/torquetech --dry-run
 ```
 
-`--mode full` runs the droplet's `./scripts/deploy-github.sh` (full `down`/`up`,
-needs runtime secrets present server-side). Default `--mode surgical` recreates
-only the `web` container — the safe path for frontend-only releases.
+`--component web` (default) performs the surgical web-only swap. `--component
+api|all` builds the linux/amd64 API image and always runs the full staged
+deployment (`mysql -> api/migrations -> web`). On prod it also runs the same
+accounting/data-protection preflight as CI.
 
 ## Recovering the public web build args
 
@@ -75,4 +87,5 @@ ssh -i ~/chthonicsystems/.ssh/id_rsa root@<droplet> \
 - SSH: key is used as an identity (`ssh -i`); never embed the private key.
 - `act` can drive these workflows locally, but its build produces images for the
   host arch — the `platforms: linux/amd64` pin above is what makes that safe.
-- Never commit `deploy.secrets`, `.act/secrets`, or any private key.
+- Keep `~/chthonicsystems/secrets.yaml` mode `0600`; never commit it, `.act/secrets`,
+  generated mapped env files, or private keys.
