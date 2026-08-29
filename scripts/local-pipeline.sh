@@ -4,39 +4,35 @@
 # mirroring the daily CI chain WITHOUT using GitHub Actions minutes.
 #
 # Stages (each gated on the previous — a failure stops the pipeline):
-#   1. beta    — build + deploy web to beta (native linux/amd64) via local-deploy.sh
+#   1. beta    — build + deploy api+web to beta (native linux/amd64, migrations)
 #   2. test    — run the FULL Playwright suite against beta (the gate; stop on failure)
-#   3. prod    — build + deploy web to prod via local-deploy.sh
+#   3. prod    — run prod preflight, then build + deploy api+web (migrations)
 #   4. android — web build + cap sync + `fastlane android internal` (AAB → Play Store) + S3 mirror
 #   5. ios     — web build + cap sync + `fastlane ios beta` (TestFlight) + `fastlane ios release`
 #
 # This is the "release from a laptop" companion to local-deploy.sh. It does REAL
 # deploys and store submissions — treat it like a production release.
 #
-# Usage:
-#   ./local-pipeline.sh --repo ~/chthonicsystems/torquetech --secrets-file ./pipeline.secrets \
-#       [--ref origin/main] [--only beta|test|prod|android|ios] [--skip-mobile] [--skip-prod] [--dry-run]
+# Usage (secrets.yaml defaults to ~/chthonicsystems/secrets.yaml):
+#   ./local-pipeline.sh --repo ~/chthonicsystems/torquetech \
+#       [--secrets-yaml /path/to/secrets.yaml] [--ref origin/main] \
+#       [--only beta|test|prod|android|ios] [--skip-mobile] [--skip-prod] [--dry-run]
 #
-# secrets-file (KEY=VALUE, git-ignored) — superset of local-deploy.sh keys, plus:
-#   Android: KEYSTORE_PATH KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD
-#            FIREBASE_SERVICE_ACCOUNT_JSON (Google Play API key JSON, full content)
-#            AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION AWS_S3_BUCKET_ANDROID
-#   iOS:     APP_STORE_CONNECT_API_KEY_ID APP_STORE_CONNECT_API_ISSUER_ID APP_STORE_CONNECT_API_KEY_PATH
-#            MATCH_PASSWORD
-#            IOS_SIGNING_P12_PATH IOS_SIGNING_P12_PASSWORD  (macOS: seeds the signing identity into a
-#                                                            temp keychain because `security import`
-#                                                            rejects match's empty-password p12)
-#   Public OAuth build args have committed defaults in web/scripts/native-build.sh, so are optional.
+# secrets.yaml is the sole local secret source. scripts/secrets-yaml-to-env.rb
+# maps the required deploy/mobile values into a short-lived 0600 env file which
+# is parsed literally and deleted on exit. CI continues to use GitHub Environment
+# secrets and never reads this local inventory.
 #
 set -euo pipefail
 
 # ---- args ----------------------------------------------------------------
-REPO="" SECRETS="" REF="origin/main" ONLY="" SKIP_MOBILE=0 SKIP_PROD=0 DRY=0
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="" SECRETS_YAML="${HOME}/chthonicsystems/secrets.yaml" REF="origin/main" ONLY="" SKIP_MOBILE=0 SKIP_PROD=0 DRY=0
 BETA_HOST="torquetech-beta.chthonicsystems.com"
 PROD_URL="https://torquetech.chthonicsystems.com"
 while [ $# -gt 0 ]; do case "$1" in
   --repo) REPO="$2"; shift 2;;
-  --secrets-file) SECRETS="$2"; shift 2;;
+  --secrets-yaml) SECRETS_YAML="$2"; shift 2;;
   --ref) REF="$2"; shift 2;;
   --only) ONLY="$2"; shift 2;;
   --skip-mobile) SKIP_MOBILE=1; shift;;
@@ -45,18 +41,35 @@ while [ $# -gt 0 ]; do case "$1" in
   *) echo "unknown arg: $1" >&2; exit 2;;
 esac; done
 [ -n "$REPO" ] || { echo "--repo is required" >&2; exit 2; }
-[ -n "$SECRETS" ] && [ -f "$SECRETS" ] || { echo "--secrets-file <file> is required and must exist" >&2; exit 2; }
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$SECRETS_YAML" ] || { echo "secrets YAML not found: $SECRETS_YAML" >&2; exit 2; }
+[ -f "$SCRIPT_DIR/secrets-yaml-to-env.rb" ] || { echo "secrets adapter not found" >&2; exit 2; }
 export PATH="/opt/homebrew/opt/ruby/bin:/opt/homebrew/lib/ruby/gems/4.0.0/bin:$PATH"
 
+SECRETS="$(mktemp "${TMPDIR:-/tmp}/tt-local-pipeline-secrets.XXXXXX")"
+chmod 600 "$SECRETS"
+KC="" KC_CREATED=0
+ORIGINAL_KEYCHAINS=()
+cleanup() {
+  if [ "$KC_CREATED" = 1 ] && [ -n "$KC" ]; then
+    if [ "${#ORIGINAL_KEYCHAINS[@]}" -gt 0 ]; then
+      security list-keychains -d user -s "${ORIGINAL_KEYCHAINS[@]}" >/dev/null 2>&1 || true
+    fi
+    security delete-keychain "$KC" >/dev/null 2>&1 || true
+  fi
+  rm -f "$SECRETS"
+}
+trap cleanup EXIT
+ruby "$SCRIPT_DIR/secrets-yaml-to-env.rb" "$SECRETS_YAML" "$SECRETS"
+
 run() { echo "+ $*"; [ "$DRY" = 1 ] && return 0; "$@"; }
+run_secret() { local label="$1"; shift; echo "+ $label [secret arguments redacted]"; [ "$DRY" = 1 ] && return 0; "$@"; }
 want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
 log() { printf '\n\033[36m==== %s ====\033[0m\n' "$*"; }
 
 # ---- 1. beta deploy ------------------------------------------------------
 if want beta; then
-  log "STAGE 1/5 — deploy web to BETA (native amd64)"
-  run "$SCRIPT_DIR/local-deploy.sh" --env beta --repo "$REPO" --secrets-file "$SECRETS" --ref "$REF"
+  log "STAGE 1/5 — deploy api+web to BETA (native amd64 + migrations)"
+  run "$SCRIPT_DIR/local-deploy.sh" --env beta --repo "$REPO" --secrets-yaml "$SECRETS_YAML" --ref "$REF" --component all
 fi
 
 # ---- 2. full Playwright suite against beta (GATE) ------------------------
@@ -72,11 +85,11 @@ fi
 
 # ---- 3. prod deploy ------------------------------------------------------
 if want prod && [ "$SKIP_PROD" = 0 ]; then
-  log "STAGE 3/5 — deploy web to PROD (native amd64)"
-  run "$SCRIPT_DIR/local-deploy.sh" --env prod --repo "$REPO" --secrets-file "$SECRETS" --ref "$REF"
+  log "STAGE 3/5 — prod preflight + deploy api+web (native amd64 + migrations)"
+  run "$SCRIPT_DIR/local-deploy.sh" --env prod --repo "$REPO" --secrets-yaml "$SECRETS_YAML" --ref "$REF" --component all
 fi
 
-# Mobile stages load the secrets-file into the environment for fastlane.
+# Mobile stages load the ephemeral mapped env into the process for fastlane.
 # Parse literally (no shell-sourcing) so values with $, spaces, quotes, () are safe.
 load_secrets() {
   local file="$1" line key val
@@ -125,15 +138,26 @@ if want ios && [ "$SKIP_MOBILE" = 0 ]; then
   # `security import` rejects match's empty-password p12 on recent macOS. match
   # then finds the identity already present and gym signs with it.
   if [ -n "${IOS_SIGNING_P12_PATH:-}" ]; then
-    KC=/tmp/tt-pipeline-signing.keychain-db
+    KC="${TMPDIR:-/tmp}/tt-pipeline-signing.keychain-db"
+    if [ "$DRY" != 1 ]; then
+      while IFS= read -r keychain; do
+        keychain="${keychain#\"}"; keychain="${keychain%\"}"
+        [ -z "$keychain" ] || [ "$keychain" = "$KC" ] || ORIGINAL_KEYCHAINS+=("$keychain")
+      done < <(security list-keychains -d user | sed 's/^[[:space:]]*//')
+    fi
     run security delete-keychain "$KC" 2>/dev/null || true
     run security create-keychain -p tt "$KC"
+    [ "$DRY" = 1 ] || KC_CREATED=1
     run security set-keychain-settings -lut 7200 "$KC"
     run security unlock-keychain -p tt "$KC"
-    run security import "$IOS_SIGNING_P12_PATH" -k "$KC" -P "${IOS_SIGNING_P12_PASSWORD:-}" -T /usr/bin/codesign -T /usr/bin/security
+    run_secret "security import $IOS_SIGNING_P12_PATH" security import "$IOS_SIGNING_P12_PATH" -k "$KC" -P "${IOS_SIGNING_P12_PASSWORD:-}" -T /usr/bin/codesign -T /usr/bin/security
     run security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k tt "$KC" >/dev/null 2>&1 || true
-    # keep the login keychain in the search list (git creds + WWDR chain) alongside ours
-    run security list-keychains -d user -s "$HOME/Library/Keychains/login.keychain-db" "$KC"
+    # Preserve every original search-list entry and append only our temporary keychain.
+    if [ "$DRY" = 1 ]; then
+      run security list-keychains -d user -s "$HOME/Library/Keychains/login.keychain-db" "$KC"
+    else
+      run security list-keychains -d user -s "${ORIGINAL_KEYCHAINS[@]}" "$KC"
+    fi
     export MATCH_KEYCHAIN_NAME="$KC" MATCH_KEYCHAIN_PASSWORD=tt
     export MATCH_GIT_BASIC_AUTHORIZATION="$(printf 'x-access-token:%s' "$(gh auth token)" | base64 | tr -d '\n')"
   fi
