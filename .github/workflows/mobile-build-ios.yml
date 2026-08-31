@@ -73,6 +73,14 @@ on:
         type: string
         required: false
         default: 'production'
+      use-explicit-ios-signing:
+        description: >-
+          Import IOS_CERTIFICATE_BASE64 + IOS_PROVISIONING_PROFILE_BASE64
+          directly instead of using Fastlane Match. Opt-in for products whose
+          PKCS12 carries its own password.
+        type: boolean
+        required: false
+        default: false
       ruby-version:
         description: 'Ruby version for Fastlane'
         type: string
@@ -300,6 +308,32 @@ jobs:
           echo "$API_KEY_BASE64" | base64 --decode > "$HOME/.private_keys/AuthKey_${API_KEY_ID}.p8"
           echo "APP_STORE_CONNECT_API_KEY_PATH=$HOME/.private_keys/AuthKey_${API_KEY_ID}.p8" >> "$GITHUB_ENV"
 
+      - name: Install explicit iOS code signing
+        if: inputs.use-explicit-ios-signing
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          echo "$CERTIFICATE_BASE64" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" \
+            -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo "$PROVISIONING_PROFILE_BASE64" | base64 --decode \
+            > "$HOME/Library/MobileDevice/Provisioning Profiles/TorqueTech.mobileprovision"
+
       - name: Install web deps + cap sync ios
         run: |
           cd ${{ inputs.working-directory }}
@@ -327,6 +361,7 @@ jobs:
           APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
           MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
+          CI_EXPLICIT_SIGNING: ${{ inputs.use-explicit-ios-signing }}
         run: bundle exec fastlane ${{ inputs.beta-lane }}
 
       - name: Configure AWS credentials
@@ -348,9 +383,10 @@ jobs:
       - name: Cleanup keychain
         if: always()
         run: |
-          # Defensive cleanup; setup_ci's keychain is ephemeral but we
-          # don't want any persistent state on the runner just in case.
+          # Clean up either setup_ci's keychain or the opt-in explicit-signing
+          # keychain so hosted and self-hosted runners retain no signing state.
           security delete-keychain "$RUNNER_TEMP/fastlane_tmp_keychain"-* 2>/dev/null || true
+          security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" 2>/dev/null || true
 
       - name: Summary
         run: |
