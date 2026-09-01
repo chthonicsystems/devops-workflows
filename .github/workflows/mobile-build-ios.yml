@@ -330,9 +330,24 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
 
-          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
-          echo "$PROVISIONING_PROFILE_BASE64" | base64 --decode \
-            > "$HOME/Library/MobileDevice/Provisioning Profiles/TorqueTech.mobileprovision"
+          PROFILE_SOURCE="$RUNNER_TEMP/TorqueTech.mobileprovision"
+          echo "$PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PROFILE_SOURCE"
+          PROFILE_UUID="$(security cms -D -i "$PROFILE_SOURCE" \
+            | plutil -extract UUID raw -)"
+          PROFILE_NAME="$(security cms -D -i "$PROFILE_SOURCE" \
+            | plutil -extract Name raw -)"
+          PROFILE_TEAM_ID="$(security cms -D -i "$PROFILE_SOURCE" \
+            | plutil -extract TeamIdentifier.0 raw -)"
+          {
+            echo "IOS_PROVISIONING_PROFILE_NAME=$PROFILE_NAME"
+            echo "IOS_SIGNING_TEAM_ID=$PROFILE_TEAM_ID"
+          } >> "$GITHUB_ENV"
+
+          XCODE_PROFILE_DIR="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+          LEGACY_PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$XCODE_PROFILE_DIR" "$LEGACY_PROFILE_DIR"
+          cp "$PROFILE_SOURCE" "$XCODE_PROFILE_DIR/$PROFILE_UUID.mobileprovision"
+          cp "$PROFILE_SOURCE" "$LEGACY_PROFILE_DIR/$PROFILE_UUID.mobileprovision"
 
       - name: Install web deps + cap sync ios
         run: |
