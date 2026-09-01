@@ -377,6 +377,10 @@ jobs:
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
           MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
           CI_EXPLICIT_SIGNING: ${{ inputs.use-explicit-ios-signing }}
+          # Xcode 26 resolves 100+ Swift package targets before returning build
+          # settings; Fastlane's 3-second base timeout exhausts all retries.
+          FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT: "60"
+          FASTLANE_XCODEBUILD_SETTINGS_RETRIES: "4"
         run: bundle exec fastlane ${{ inputs.beta-lane }}
 
       - name: Configure AWS credentials
