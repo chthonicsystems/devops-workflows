@@ -72,6 +72,11 @@ on:
         type: string
         required: false
         default: ''
+      e2e-skip-readiness:
+        description: "Skip the e2e gate's seeded-admin readiness probe ('true' | 'false'). For products whose fresh environments have no seed account; their specs carry their own health assertions."
+        type: string
+        required: false
+        default: 'false'
       working-directory:
         description: 'Server-side working directory'
         type: string
@@ -415,6 +420,7 @@ jobs:
     with:
       base-url: https://${{ inputs.domain }}
       spec-glob: ${{ inputs.e2e-spec-glob }}
+      skip-readiness: ${{ inputs.e2e-skip-readiness }}
       report-name: playwright-report-beta
       summary-title: '🎭 Beta E2E Test Results'
       runner-environment: ${{ inputs.runner-environment }}

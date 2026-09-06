@@ -38,6 +38,11 @@ on:
         type: string
         required: false
         default: ''
+      e2e-skip-readiness:
+        description: "Skip the e2e gate's seeded-admin readiness probe ('true' | 'false')."
+        type: string
+        required: false
+        default: 'false'
       full-e2e-runner-environment:
         description: 'GitHub Environment containing credentials for the full Playwright gate'
         type: string
@@ -138,6 +143,7 @@ jobs:
     uses: chthonicsystems/devops-workflows/.github/workflows/e2e-gate.yml@main
     with:
       base-url: ${{ inputs.full-e2e-base-url }}
+      skip-readiness: ${{ inputs.e2e-skip-readiness }}
       checkout-ref: ${{ needs.find-green-commit.outputs.sha }}
       report-name: playwright-report-pre-prod-full
       summary-title: '🎭 Full Pre-Production E2E Gate'
