@@ -210,6 +210,12 @@ jobs:
 
   ssl-setup-prod:
     needs: [find-green-commit, build-web-prod]
+    # Explicit condition required: the implicit success() looks at ALL
+    # transitive ancestors, so the (legitimately) skipped playwright-e2e-full
+    # poisons every downstream job even when direct needs succeeded.
+    if: >-
+      !cancelled() &&
+      needs.build-web-prod.result == 'success'
     runs-on: ${{ inputs.runs-on }}
     environment: ${{ inputs.runner-environment }}
     steps:
@@ -266,6 +272,10 @@ jobs:
 
   deploy-prod:
     needs: [find-green-commit, ssl-setup-prod]
+    # Same transitive-skip guard as ssl-setup-prod.
+    if: >-
+      !cancelled() &&
+      needs.ssl-setup-prod.result == 'success'
     runs-on: ${{ inputs.runs-on }}
     environment: ${{ inputs.runner-environment }}
     steps:
