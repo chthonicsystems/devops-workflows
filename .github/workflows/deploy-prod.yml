@@ -146,7 +146,13 @@ jobs:
 
   build-web-prod:
     needs: [find-green-commit, playwright-e2e-full]
+    # !cancelled() is load-bearing: without a status-check function GitHub
+    # prepends an implicit success(), which is false when playwright-e2e-full
+    # is SKIPPED (the normal cascade case — beta already ran the full suite).
+    # That implicit success() made every cascaded prod deploy since the CI
+    # restructure a silent no-op that still concluded green.
     if: >-
+      !cancelled() &&
       needs.find-green-commit.outputs.should_deploy == 'true' &&
       (needs.playwright-e2e-full.result == 'success' ||
        needs.playwright-e2e-full.result == 'skipped')
