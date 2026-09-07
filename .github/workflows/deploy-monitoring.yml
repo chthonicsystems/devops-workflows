@@ -103,8 +103,12 @@ jobs:
             DOMAIN=$DOMAIN
             EOF
 
-            docker compose -f ${{ inputs.compose-file }} --env-file .env.monitoring down
+            # Pull BEFORE down: a failed pull (disk full, registry outage)
+            # then aborts the deploy while the OLD stack is still running.
+            # The down->pull ordering took the whole monitoring stack out on
+            # 2026-09-07 when the droplet ran out of disk mid-pull.
             docker compose -f ${{ inputs.compose-file }} --env-file .env.monitoring pull
+            docker compose -f ${{ inputs.compose-file }} --env-file .env.monitoring down
             docker compose -f ${{ inputs.compose-file }} --env-file .env.monitoring up -d
             docker system prune -f
         env:
