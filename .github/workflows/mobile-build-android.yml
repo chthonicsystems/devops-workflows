@@ -39,6 +39,11 @@ on:
         type: string
         required: false
         default: 'web'
+      web-build-command:
+        description: 'Command that builds the web bundle (CRA products pass npx react-scripts build)'
+        type: string
+        required: false
+        default: './node_modules/.bin/ionic build'
       app-version-json-path:
         description: 'Path to web/app_version.json relative to repo root'
         type: string
@@ -217,7 +222,7 @@ jobs:
         run: |
           cd ${{ inputs.working-directory }}
           npm ci --include=dev
-          ./node_modules/.bin/ionic build
+          ${{ inputs.web-build-command }}
           ./node_modules/.bin/cap sync android
 
       - name: Verify API URL baked into bundle

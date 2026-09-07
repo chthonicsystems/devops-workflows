@@ -48,6 +48,11 @@ on:
         type: string
         required: false
         default: 'web'
+      web-build-command:
+        description: 'Command that builds the web bundle (CRA products pass npx react-scripts build)'
+        type: string
+        required: false
+        default: './node_modules/.bin/ionic build'
       app-version-json-path:
         description: 'Path to web/app_version.json relative to repo root'
         type: string
@@ -255,7 +260,7 @@ jobs:
           REACT_APP_APPLE_CLIENT_ID: ${{ inputs.react-app-apple-client-id }}
           REACT_APP_VERSION: ${{ needs.check-s3.outputs.version }}
           NODE_ENV: production
-        run: cd ${{ inputs.working-directory }} && ./node_modules/.bin/ionic build
+        run: cd ${{ inputs.working-directory }} && ${{ inputs.web-build-command }}
 
       - name: Verify API URL baked into bundle
         run: |
@@ -362,6 +367,12 @@ jobs:
         # reference in CapApp-SPM/Package.swift to a non-colliding name.
         run: |
           cd ${{ inputs.working-directory }}
+          # No-op for products that don't ship @capacitor-firebase/app-check
+          # (e.g. PetCare); the collision only exists when the plugin is present.
+          if [ ! -d node_modules/@capacitor-firebase/app-check ]; then
+            echo "app-check plugin not present — skipping SPM workaround"
+            exit 0
+          fi
           ln -sf "$(pwd)/node_modules/@capacitor-firebase/app-check" \
                  "$(pwd)/node_modules/@capacitor-firebase/capacitor-firebase-app-check"
           sed -i '' 's|@capacitor-firebase/app-check"|@capacitor-firebase/capacitor-firebase-app-check"|' \
