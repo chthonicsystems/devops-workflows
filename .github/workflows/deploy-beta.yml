@@ -276,6 +276,11 @@ jobs:
           image-name: ${{ inputs.docker-image-prefix }}-backup
           platforms: linux/amd64
           context: ${{ inputs.backup-context }}
+          # The backup Dockerfile installs the private @chthonicsystems
+          # backup CLI from GitHub Packages at build time, so it needs the
+          # same PAT the API and Web builds receive.
+          build-args: |
+            GITHUB_PACKAGES_PAT=${{ env.GITHUB_PACKAGES_PAT }}
           metadata-tags: |
             type=sha,prefix={{branch}}-
             type=raw,value=latest
