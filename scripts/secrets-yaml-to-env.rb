@@ -74,6 +74,8 @@ env = {
   "STRIPE_WEBHOOK_SECRET" => dig!(data, "stripe_live", "webhook_secret"),
   "STRIPE_CONNECT_WEBHOOK_SECRET" => dig_optional(data, "stripe_live", "connect_webhook_secret"),
   "PAYMENTS_PAY_LINK_SECRET" => dig!(data, "payments", "pay_link_secret"),
+  # PetCare's seeded platform sysadmin (`admin`): initial password per stack, optional.
+  "SYSADMIN_PASSWORD" => dig_optional(data, "petcare_sysadmin", "prod_password"),
   "XERO_CLIENT_ID" => dig!(data, "xero", "prod", "client_id"),
   "XERO_CLIENT_SECRET" => dig!(data, "xero", "prod", "client_secret"),
   "XERO_WEBHOOK_KEY" => dig!(data, "xero", "prod", "webhook_signing_key"),
@@ -86,6 +88,7 @@ env = {
   "STRIPE_WEBHOOK_SECRET_BETA" => dig!(data, "stripe", "webhook_secret"),
   "STRIPE_CONNECT_WEBHOOK_SECRET_BETA" => dig!(data, "stripe", "connect_webhook_secret"),
   "PAYMENTS_PAY_LINK_SECRET_BETA" => dig!(data, "payments", "pay_link_secret"),
+  "SYSADMIN_PASSWORD_BETA" => dig_optional(data, "petcare_sysadmin", "beta_password"),
   "XERO_CLIENT_ID_BETA" => dig!(data, "xero", "beta", "client_id"),
   "XERO_CLIENT_SECRET_BETA" => dig!(data, "xero", "beta", "client_secret"),
   "XERO_WEBHOOK_KEY_BETA" => dig!(data, "xero", "beta", "webhook_signing_key"),
